@@ -45,6 +45,9 @@ python cve_search.py "D-Link DIR-850L" --download   # 顺带下载 PoC / with Po
 | `top_n` | 返回条数，`0` = 全部 / max results, `0` = all |
 | `force_refresh` | 强制绕过结果缓存 / bypass result cache |
 
+> **限速说明 / Rate limits**：GitHub API 未认证限速 60 次/小时。批量下载 PoC 时，可配合**轮换 IP** 或配置 **`GITHUB_TOKEN`**（配额升至 5000/h）缓解。
+> *Unauthenticated GitHub API is limited to 60 req/h. For bulk PoC downloads, use **rotating IPs** or set **`GITHUB_TOKEN`** (raises the quota to 5000/h).*
+
 ## 功能 / Features
 
 - 固件 + 组件 → 相关 CVE（cve.org 主源 + NVD 兜底）/ firmware + component → CVEs (cve.org primary + NVD fallback)
