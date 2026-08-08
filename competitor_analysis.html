@@ -1,0 +1,230 @@
+<title>cve_tool 竞品对比分析</title>
+<style>
+  :root {
+    --bg: #F5F7FA;
+    --surface: #FFFFFF;
+    --surface-2: #EDF1F6;
+    --text: #1B2432;
+    --muted: #5A6678;
+    --accent: #1F7A8C;
+    --accent-strong: #125C6B;
+    --accent-soft: #E3F1F4;
+    --border: #D8E0EA;
+    --good: #2F9E68;
+    --good-soft: #E5F5EC;
+    --warn: #C98A1F;
+    --warn-soft: #FBF3E2;
+    --gap: #C14B4B;
+    --gap-soft: #FBE9E9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0D1524;
+      --surface: #16203A;
+      --surface-2: #1C2942;
+      --text: #E7ECF4;
+      --muted: #93A0B5;
+      --accent: #4FAFC2;
+      --accent-strong: #6BC2D4;
+      --accent-soft: #1C3A44;
+      --border: #27344F;
+      --good: #4FBE8C;
+      --good-soft: #16382A;
+      --warn: #E0A63C;
+      --warn-soft: #3A3018;
+      --gap: #E06868;
+      --gap-soft: #3A1D1D;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0D1524;
+    --surface: #16203A;
+    --surface-2: #1C2942;
+    --text: #E7ECF4;
+    --muted: #93A0B5;
+    --accent: #4FAFC2;
+    --accent-strong: #6BC2D4;
+    --accent-soft: #1C3A44;
+    --border: #27344F;
+    --good: #4FBE8C;
+    --good-soft: #16382A;
+    --warn: #E0A63C;
+    --warn-soft: #3A3018;
+    --gap: #E06868;
+    --gap-soft: #3A1D1D;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+    font-size: 15px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 48px 28px 72px; }
+
+  /* 头部 */
+  .masthead { border-bottom: 1px solid var(--border); padding-bottom: 32px; margin-bottom: 40px; }
+  .eyebrow {
+    font-family: "Cascadia Code", ui-monospace, monospace;
+    font-size: 12px; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--accent); font-weight: 600; margin-bottom: 14px;
+  }
+  h1 { font-size: 34px; line-height: 1.15; font-weight: 700; letter-spacing: -.01em; text-wrap: balance; }
+  .sub { color: var(--muted); font-size: 16px; margin-top: 10px; max-width: 60ch; }
+  .meta { margin-top: 16px; font-size: 13px; color: var(--muted); }
+  .meta span { margin-right: 18px; }
+
+  /* 速览 */
+  .exec { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; margin: 8px 0 40px; }
+  .exec-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px 18px; }
+  .exec-card .n { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+  .exec-card .v { font-size: 15px; margin-top: 6px; color: var(--text); }
+
+  /* 区块标题 */
+  h2 { font-size: 21px; font-weight: 700; margin: 44px 0 6px; letter-spacing: -.01em; }
+  .lead { color: var(--muted); font-size: 14px; margin-bottom: 20px; max-width: 70ch; }
+
+  /* 对比表 */
+  .table-scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; min-width: 880px; font-size: 13.5px; }
+  th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { background: var(--surface-2); font-size: 12px; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); font-weight: 600; white-space: nowrap; }
+  tr:last-child td { border-bottom: none; }
+  td.dim { font-weight: 600; white-space: nowrap; color: var(--accent-strong); width: 88px; }
+  td.us { background: var(--accent-soft); }
+  .star { color: var(--muted); font-size: 12px; }
+
+  /* 优劣势 */
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 8px; }
+  .col { border-radius: 8px; padding: 18px 20px; border: 1px solid var(--border); }
+  .col h3 { font-size: 15px; margin-bottom: 12px; }
+  .col.strong { background: var(--good-soft); border-color: color-mix(in srgb, var(--good) 35%, var(--border)); }
+  .col.strong h3 { color: var(--good); }
+  .col.gap { background: var(--gap-soft); border-color: color-mix(in srgb, var(--gap) 35%, var(--border)); }
+  .col.gap h3 { color: var(--gap); }
+  .col li { margin: 7px 0 7px 18px; font-size: 14px; }
+
+  /* 路线图 */
+  .phase { margin-bottom: 22px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); overflow: hidden; }
+  .phase-h { display: flex; align-items: baseline; gap: 14px; padding: 13px 18px; background: var(--surface-2); }
+  .phase-h .tag { font-size: 12px; font-weight: 700; letter-spacing: .08em; padding: 2px 10px; border-radius: 20px; }
+  .phase-h .tag.near { background: var(--accent-soft); color: var(--accent-strong); }
+  .phase-h .tag.mid { background: var(--warn-soft); color: var(--warn); }
+  .phase-h .tag.far { background: var(--surface-2); color: var(--muted); border: 1px solid var(--border); }
+  .phase-h .t { font-weight: 700; font-size: 15px; }
+  .phase table { min-width: 0; }
+  .phase th { background: transparent; }
+  .phase th.w { width: 180px; }
+
+  /* 结论 */
+  .verdict { background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--accent); border-radius: 8px; padding: 18px 22px; margin-top: 40px; }
+  .verdict p { font-size: 14.5px; max-width: 75ch; }
+  .verdict p + p { margin-top: 10px; }
+  .foot { margin-top: 40px; font-size: 12px; color: var(--muted); }
+  code { font-family: "Cascadia Code", ui-monospace, monospace; font-size: .92em; background: var(--surface-2); padding: 1px 5px; border-radius: 4px; }
+</style>
+
+<div class="wrap">
+
+  <div class="masthead">
+    <div class="eyebrow">竞争分析 · 2026-08-08</div>
+    <h1>cve_tool 竞品对比分析</h1>
+    <p class="sub">物联网固件漏洞情报工具（固件型号 → CVE 列表 + POC 自动下载）与主流同类工具的横向对比，以及后续发展路线。</p>
+    <div class="meta"><span>对象：项目决策</span><span>维度：架构 / 功能 / 边界 / 鲁棒性 / 成熟度</span><span>工具：cve_tool（本团队自研）</span></div>
+  </div>
+
+  <div class="exec">
+    <div class="exec-card"><div class="n">我们的定位</div><div class="v">给固件型号名，返回全部相关 CVE + 自动下载 POC，直接服务 AI agent</div></div>
+    <div class="exec-card"><div class="n">核心优势</div><div class="v">POC 自动下载落盘 · MCP agent 接口 · 轻量免部署</div></div>
+    <div class="exec-card"><div class="n">主要差距</div><div class="v">无本地全量漏洞库（依赖线上 API）· 数据源少 · 无自动化测试</div></div>
+    <div class="exec-card"><div class="n">下一步</div><div class="v">本地漏洞库 + 多数据源 + 测试体系 + Kafka 接入</div></div>
+  </div>
+
+  <h2>竞品对比</h2>
+  <p class="lead">四个对照对象：<b>cve-bin-tool</b>（Intel，扫描二进制识别漏洞）、<b>cve-search</b>（经典本地 CVE 库）、<b>POC-in-GitHub</b>（社区 POC 数据索引）、<b>pyExploitDb</b>（CVE↔exploit-db 映射库）。左列为我们的 cve_tool。</p>
+
+  <div class="table-scroll">
+    <table>
+      <tr>
+        <th>维度</th><th>我们 cve_tool</th><th>cve-bin-tool <span class="star">★1745</span></th><th>cve-search <span class="star">★2632</span></th><th>POC-in-GitHub <span class="star">★7957</span></th><th>pyExploitDb <span class="star">★31</span></th>
+      </tr>
+      <tr><td class="dim">定位</td><td class="us">固件名 → CVE 列表 + POC 下载，服务 AI agent</td><td>扫描系统/固件二进制，识别已知漏洞</td><td>本地 CVE 数据库搜索（网页 + API）</td><td>自动收集 GitHub POC，按 CVE 索引</td><td>CVE ↔ exploit-db 编号映射库</td></tr>
+      <tr><td class="dim">架构</td><td class="us">轻量 Python 6 模块，MCP server 接口</td><td>成熟包：checkers 检测器 + 多数据源 + 本地 SQLite</td><td>lib + MongoDB + web UI，老式但完整</td><td>数据仓库 + GitHub Actions 自动采集</td><td>极简：一个包 + 两个 JSON 映射</td></tr>
+      <tr><td class="dim">CVE 数据源</td><td class="us">cve.org（主）+ NVD（兜底）+ 社区 POC</td><td>6+ 源：NVD / RedHat / OSV / GAD / EPSS / RSD</td><td>NVD + RedHat + CPE</td><td>GitHub（仅 POC）</td><td>exploit-db</td></tr>
+      <tr><td class="dim">POC 获取</td><td class="us"><b>自动下载落盘</b>：GitHub + exploit-db + 社区搜索，内容嗅探扩展名</td><td>不下载 POC</td><td>不下载 POC</td><td>仅索引链接（需自己抓）</td><td>仅编号映射</td></tr>
+      <tr><td class="dim">部署形态</td><td class="us">本机 MCP server（stdio），零依赖，agent 直接调用</td><td>CLI 工具</td><td>自建服务（MongoDB）</td><td>GitHub 数据仓库</td><td>Python 库</td></tr>
+      <tr><td class="dim">离线能力</td><td class="us">弱：查新固件需联网调 API（历史查询有缓存）</td><td><b>强</b>：全量漏洞库在本地，任意查询离线秒回</td><td><b>强</b>：全量库在本地</td><td>—（纯数据）</td><td>—</td></tr>
+      <tr><td class="dim">鲁棒性</td><td class="us">并发下载 · 限速预检 · 换 IP 重试 · 输入校验 · 死链检测 · 异常不崩</td><td>多源降级 · NVD 限速退避 · 版本解析容错</td><td>一般（依赖 MongoDB 稳定）</td><td>—</td><td>—</td></tr>
+      <tr><td class="dim">测试体系</td><td class="us">手动测试（鲁棒性已大量实测）</td><td><b>完善</b>：test/ 目录 + CI + fuzz</td><td>有基础测试</td><td>—</td><td>有基础测试</td></tr>
+      <tr><td class="dim">适用场景</td><td class="us">AI 驱动的固件漏洞情报 / 自动化 POC 收集</td><td>离线批量扫描、供应链合规（SBOM）</td><td>安全团队本地 CVE 检索</td><td>POC 情报数据源</td><td>exploit-db 集成</td></tr>
+    </table>
+  </div>
+
+  <h2>优势与差距</h2>
+  <div class="cols">
+    <div class="col strong">
+      <h3>我们的优势（相对竞品）</h3>
+      <ul>
+        <li><b>POC 自动下载落盘</b>：竞品都不直接抓 POC，我们形成"编号 + 链接 + 本地文件"闭环</li>
+        <li><b>MCP agent 接口</b>：AI agent 原生调用，非技术使用者可直接用自然语言驱动</li>
+        <li><b>轻量免部署</b>：无数据库依赖，单机即用</li>
+        <li><b>社区 POC 补充 + 死链检测</b>：官方引用缺失时能补，失效时如实标注</li>
+        <li><b>鲁棒性加固</b>：输入校验、限速预检、代理轮换、异常不崩</li>
+      </ul>
+    </div>
+    <div class="col gap">
+      <h3>与竞品的差距（需补强）</h3>
+      <ul>
+        <li><b>无本地全量漏洞库</b>：依赖线上 API，离线 / 断源 / 限速时受限（cve-bin-tool / cve-search 均有本地库）</li>
+        <li><b>数据源少</b>：2 个主源 + 社区，vs cve-bin-tool 的 6+ 源</li>
+        <li><b>无二进制/固件扫描</b>：只能按型号名搜，不能从固件文件本身提取版本→CPE 匹配</li>
+        <li><b>无自动化测试体系</b>：现有鲁棒性靠手动验证，缺 test/ + CI 防回归</li>
+        <li><b>输出格式单薄</b>：仅 JSON，缺 SBOM / VEX 等企业合规格式</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2>未来路线图</h2>
+  <p class="lead">分三阶段推进，近期补短板，中期追平竞品，远期向平台化演进。</p>
+
+  <div class="phase">
+    <div class="phase-h"><span class="tag near">近期</span><span class="t">补齐基础能力</span></div>
+    <table>
+      <tr><th class="w">能力</th><th>解决什么</th><th>参考</th></tr>
+      <tr><td><b>本地 CVE 库</b></td><td>漏洞数据同步本地，任意固件离线秒回，彻底摆脱 API 限速与断源</td><td>cve-bin-tool / cve-search</td></tr>
+      <tr><td><b>多数据源扩展</b></td><td>接入 OSV / RedHat / GAD 等免费源，提升覆盖面（架构已支持）</td><td>cve-bin-tool data_sources</td></tr>
+      <tr><td><b>自动化测试体系</b></td><td>把已实测的鲁棒性固化成 test/ + CI，防回归</td><td>cve-bin-tool test/</td></tr>
+      <tr><td><b>Kafka 接入</b></td><td>搜索结果元数据推服务器分发（POC 文件留本地），为平台化铺路</td><td>已预留挂载点</td></tr>
+      <tr><td><b>MCP HTTP 部署</b></td><td>工具服务器化，远程 agent 调用</td><td>—</td></tr>
+    </table>
+  </div>
+
+  <div class="phase">
+    <div class="phase-h"><span class="tag mid">中期</span><span class="t">追平竞品</span></div>
+    <table>
+      <tr><th class="w">能力</th><th>解决什么</th><th>参考</th></tr>
+      <tr><td><b>固件二进制扫描</b></td><td>从固件文件提取版本 → CPE 匹配 → CVE，不依赖型号名准确</td><td>cve-bin-tool</td></tr>
+      <tr><td><b>快代理海外 IP 池</b></td><td>批量扫描抗 GitHub 限速，IP 轮换</td><td>已留 kuaidaili 接口</td></tr>
+      <tr><td><b>输出格式 SBOM / VEX</b></td><td>对接企业供应链与合规系统</td><td>cve-bin-tool</td></tr>
+    </table>
+  </div>
+
+  <div class="phase">
+    <div class="phase-h"><span class="tag far">远期</span><span class="t">平台化</span></div>
+    <table>
+      <tr><th class="w">能力</th><th>解决什么</th><th>参考</th></tr>
+      <tr><td><b>分布式多实例</b></td><td>大规模批量扫描，多机协同</td><td>—</td></tr>
+      <tr><td><b>威胁情报联动</b></td><td>对接漏洞情报源，主动推送新洞</td><td>—</td></tr>
+    </table>
+  </div>
+
+  <div class="verdict">
+    <p><b>结论：</b>cve_tool 在"固件名 → CVE + POC 下载 + AI agent 接口"这条链路明显领先竞品（它们不直接抓 POC、无 agent 接口），适合作为 AI 驱动的漏洞情报前端。</p>
+    <p>但要站稳脚跟，应尽快补齐 <b>本地漏洞库</b> 和 <b>自动化测试</b> 两块短板——前者解决离线与限速的硬伤，后者保证长期可维护性。近期路线图即针对此展开。</p>
+  </div>
+
+  <div class="foot">cve_tool · 竞品对比分析 · 数据截至 2026-08-08 · 星标为 GitHub Stars</div>
+
+</div>

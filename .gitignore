@@ -1,0 +1,13 @@
+# 虚拟环境
+.venv/
+
+# 运行数据（下载的 POC、API 缓存）
+output/
+cache/
+
+# Python
+__pycache__/
+*.pyc
+
+# 测试
+.pytest_cache/
