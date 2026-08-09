@@ -39,7 +39,7 @@ python cve_search.py "D-Link DIR-850L" --download   # 顺带下载 PoC / with Po
 | 参数 / Param | 说明 / Description |
 |---|---|
 | `firmware_name` | 固件型号名，如 `"D-Link DIR-850L"`；也支持 CVE 编号 / firmware model, e.g. `"D-Link DIR-850L"`; CVE IDs also supported |
-| `component` | 固件内组件名（字符串/列表，如 `"busybox"`），信息增强 / component names (str or list, e.g. `"busybox"`) for enrichment |
+| `component` | 固件内组件名（字符串/列表，如 `"busybox"`，可带版本 `"openssl 1.0.1f"`），信息增强；带版本时按受影响版本精化 / component names (str or list, e.g. `"busybox"`, or with version like `"openssl 1.0.1f"`); version-aware refinement when provided |
 | `download_poc` | 下载 PoC 到本地 / download PoCs to `output/` |
 | `community_poc` | 额外搜 GitHub 社区 PoC / also search GitHub community PoCs |
 | `top_n` | 返回条数，`0` = 全部 / max results, `0` = all |

@@ -485,8 +485,9 @@ def _apply_epss(results):
         r["score"] = round(min(r["score"] + EPSS_WEIGHT * hit[0], 1.0), 3)
 
 
-def _search_product(query, source_tag, max_results=20):
-    """搜一个产品名（固件或组件），返回带 from 标记的 scored 结果（截断 max_results）。"""
+def _search_product(query, source_tag, max_results=20, version=None):
+    """搜一个产品名（固件或组件），返回带 from 标记的 scored 结果（截断 max_results）。
+    version 提供时做受影响版本匹配：明确不受影响的剔除，命中的加分。"""
     fw = parse_firmware(query)
     if not re.search(r"[a-z]", fw["model_core"]) or len(fw["model_core"]) < 3:
         return []   # 泛化守卫
@@ -501,7 +502,15 @@ def _search_product(query, source_tag, max_results=20):
             r["score"] = round(score, 3)
             r["match_reasons"] = reasons
             r["from"] = source_tag
+            r["version_match"] = _version_in_ranges(version, _cve_version_ranges(cve)) if version else None
             out.append(r)
+    if version:
+        # 明确不受影响的剔除（有版本信息但不在受影响范围内）
+        out = [r for r in out if r.get("version_match") is not False]
+        for r in out:
+            if r.get("version_match") is True:
+                r["score"] = round(min(r["score"] + 0.1, 1.0), 3)
+                r["match_reasons"] = r.get("match_reasons", []) + [f"ver_match:{version}"]
     out.sort(key=lambda x: x["score"], reverse=True)
     return out[:max_results]
 
@@ -555,8 +564,143 @@ def _components_key(component):
     if not component:
         return ""
     if isinstance(component, str):
-        return component.strip()
-    return ",".join(sorted(str(c).strip() for c in component if c))
+        return _component_str(component)
+    return ",".join(sorted(_component_str(c) for c in component if c))
+
+
+def _component_str(comp):
+    """组件归一成可读字符串（含版本）。"""
+    if isinstance(comp, dict):
+        name = (comp.get("name") or "").strip()
+        ver = (comp.get("version") or "").strip()
+        return f"{name} {ver}" if ver else name
+    return (comp or "").strip()
+
+
+def _components_list(component):
+    """组件参数归一成字符串列表（含版本，用于输出展示）。"""
+    if not component:
+        return []
+    comps = [component] if isinstance(component, str) else component
+    return [_component_str(c) for c in comps if c]
+
+
+def _parse_component(comp):
+    """解析组件为 (name, version)。支持：
+    'openssl' → ('openssl', None)
+    'openssl 1.0.1f' → ('openssl', '1.0.1f')
+    {'name':'openssl','version':'1.0.1f'} → ('openssl', '1.0.1f')"""
+    if isinstance(comp, dict):
+        name = (comp.get("name") or "").strip()
+        ver = (comp.get("version") or "").strip()
+        return name, (ver or None)
+    s = (comp or "").strip()
+    if not s:
+        return "", None
+    m = re.search(r"\s(v?\d[\d.\-]*(?:[a-z]+\d*)?)\s*$", s)
+    if m:
+        return s[:m.start()].strip(), m.group(1)
+    return s, None
+
+
+def _ver_key(v):
+    """版本号转可比较数值元组。'1.0.1f'/'v2.5' → (1,0,1)/(2,5)。无法解析返回 None。"""
+    if v is None:
+        return None
+    m = re.match(r"v?(\d+(?:[.\-]\d+)*)", str(v).strip().lower())
+    if not m:
+        return None
+    return tuple(int(x) for x in re.split(r"[.\-]", m.group(1)))
+
+
+def _ver_cmp(a, b):
+    """版本比较：1/-1/0；无法比较返回 None。"""
+    ka, kb = _ver_key(a), _ver_key(b)
+    if ka is None or kb is None:
+        return None
+    return (ka > kb) - (ka < kb)
+
+
+def _parse_range_string(s):
+    """解析版本范围字符串 '>= 0.10.50, < 0.10.80' → [('ge','0.10.50'),('lt','0.10.80')]。"""
+    out = []
+    if not s or s in ("n/a", "*", "-"):
+        return out
+    for part in str(s).split(","):
+        part = part.strip()
+        m = re.match(r"(<=|>=|<|>|==|=)\s*(v?\d[\d.\-]*)", part)
+        if m:
+            op = {"<=": "le", ">=": "ge", "<": "lt", ">": "gt", "==": "eq", "=": "eq"}[m.group(1)]
+            out.append((op, m.group(2)))
+        else:
+            m2 = re.match(r"v?\d[\d.\-]*", part)
+            if m2:
+                out.append(("eq", m2.group(0)))
+    return out
+
+
+def _cve_version_ranges(cve):
+    """提取 CVE 受影响版本范围，返回 [(op, ver)]。
+    op: le(<=) / lt(<) / eq(==) / ge(>=) / gt(>)。
+    cve.org: affected[].versions[]（lessThanOrEqual/lessThan/version 可能是范围字符串）
+    NVD: configurations[].nodes[].cpeMatch[]（versionStart/End Including/Excluding）"""
+    ranges = []
+    for a in (cve.get("affected") or []):
+        if not isinstance(a, dict):
+            continue
+        for v in (a.get("versions") or []):
+            if not isinstance(v, dict):
+                continue
+            if v.get("status") not in (None, "affected"):
+                continue
+            if v.get("lessThanOrEqual"):
+                ranges.append(("le", str(v["lessThanOrEqual"])))
+            if v.get("lessThan"):
+                ranges.append(("lt", str(v["lessThan"])))
+            if v.get("version") and v.get("version") != "*":
+                ranges.extend(_parse_range_string(v["version"]))
+    for cfg in (cve.get("configurations") or []):
+        if not isinstance(cfg, dict):
+            continue
+        for node in (cfg.get("nodes") or []):
+            if not isinstance(node, dict):
+                continue
+            for m in (node.get("cpeMatch") or []):
+                if not isinstance(m, dict):
+                    continue
+                if m.get("versionEndIncluding"):
+                    ranges.append(("le", str(m["versionEndIncluding"])))
+                if m.get("versionEndExcluding"):
+                    ranges.append(("lt", str(m["versionEndExcluding"])))
+                if m.get("versionStartIncluding"):
+                    ranges.append(("ge", str(m["versionStartIncluding"])))
+                if m.get("versionStartExcluding"):
+                    ranges.append(("gt", str(m["versionStartExcluding"])))
+    return ranges
+
+
+def _version_in_ranges(version, ranges):
+    """输入版本是否落在 CVE 受影响范围。
+    True=命中；False=明确不受影响；None=无法判断（无版本信息/不可比较）。"""
+    if not version or not ranges:
+        return None
+    any_compared = False
+    for op, rv in ranges:
+        c = _ver_cmp(version, rv)
+        if c is None:
+            continue
+        any_compared = True
+        if op == "le" and c > 0:
+            return False
+        if op == "lt" and c >= 0:
+            return False
+        if op == "eq" and c != 0:
+            return False
+        if op == "ge" and c < 0:
+            return False
+        if op == "gt" and c <= 0:
+            return False
+    return True if any_compared else None
 
 
 def _load_result_cache(manifest_dir, query_hash, top_n, download_poc, community_poc):
@@ -683,10 +827,10 @@ def search_firmware(firmware_name, top_n=DEFAULT_TOP_N, download_poc=False, comm
     if component and not cve_id:
         comps = [component] if isinstance(component, str) else component
         for comp in comps:
-            comp = (comp or "").strip()
-            if not comp:
+            comp_name, comp_ver = _parse_component(comp)
+            if not comp_name:
                 continue
-            scored.extend(_search_product(comp, f"component:{comp}"))
+            scored.extend(_search_product(comp_name, f"component:{comp_name}", version=comp_ver))
         seen = {}
         for r in scored:
             if r["cve_id"] not in seen:
@@ -731,8 +875,7 @@ def search_firmware(firmware_name, top_n=DEFAULT_TOP_N, download_poc=False, comm
     # 完整结果（存缓存用，全量不截断）
     out_full = {
         "firmware": firmware_name,
-        "components": [component] if isinstance(component, str) and component else
-                      (list(component) if component else []),
+        "components": _components_list(component),
         "found": bool(scored_all),
         "candidate_count": len(candidates),
         "result_count": len(scored_all),
