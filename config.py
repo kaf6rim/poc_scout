@@ -52,6 +52,11 @@ GITHUB_SEARCH_SLEEP = float(os.environ.get("GITHUB_SEARCH_SLEEP", "7"))  # 搜�
 # 结果缓存：同一固件查过 TTL 内直接读 output/<固件>/_result.json，不重跑不重下
 RESULT_CACHE_TTL = int(os.environ.get("RESULT_CACHE_TTL", "86400"))  # 默认 24h
 
+# OSV（Google 开源组件漏洞库）：组件搜索增强，带精确版本范围
+OSV_API_URL = "https://api.osv.dev/v1/query"
+OSV_ECOSYSTEMS = ["Debian", "Ubuntu", "Alpine"]   # 固件组件常用发行版生态
+OSV_ENABLED = True
+
 # 组件搜索候选上限：openssl 这种大组件候选上千，限制抓取量避免拖慢（信息增强够用即可）
 COMPONENT_CANDIDATE_LIMIT = int(os.environ.get("COMPONENT_CANDIDATE_LIMIT", "50"))
 

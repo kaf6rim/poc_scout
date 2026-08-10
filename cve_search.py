@@ -19,6 +19,7 @@ from config import (
     DESCRIPTION_EXCERPT_LEN, DEFAULT_TOP_N, OUTPUT_DIR, DOWNLOAD_CONCURRENCY,
     RESULT_CACHE_TTL, EPSS_API_URL, EPSS_WEIGHT, EPSS_ENABLED,
     COMPONENT_CANDIDATE_LIMIT,
+    OSV_API_URL, OSV_ECOSYSTEMS, OSV_ENABLED,
 )
 from cache import CachedRequest
 from poc_downloader import (
@@ -212,6 +213,63 @@ def collect_nvd(fw, cve_id=None, candidate_limit=None):
             if start >= data.get("totalResults", 0):
                 break
     return list(seen.values())
+
+
+# ---------- provider: OSV（组件漏洞，精确版本范围）----------
+
+def _osv_to_common(vuln):
+    """OSV 漏洞记录归一化成内部通用结构。id 优先取 CVE alias。"""
+    aliases = vuln.get("aliases") or []
+    cve_id = next((a for a in aliases if a.startswith("CVE-")), None)
+    vid = vuln.get("id", "")
+    if not cve_id and vid.startswith("CVE-"):
+        cve_id = vid
+    affected = []
+    osv_ranges = []
+    for a in vuln.get("affected") or []:
+        if not isinstance(a, dict):
+            continue
+        pkg = a.get("package") or {}
+        affected.append({"product": pkg.get("name", ""), "vendor": ""})
+        for rr in (a.get("ranges") or []):
+            for ev in (rr.get("events") or []):
+                if ev.get("introduced") and ev["introduced"] not in ("0", "0.0.0"):
+                    osv_ranges.append(("ge", str(ev["introduced"])))
+                if ev.get("fixed"):
+                    osv_ranges.append(("lt", str(ev["fixed"])))
+    desc = vuln.get("summary") or vuln.get("details") or ""
+    return {
+        "id": cve_id or vid,
+        "published": vuln.get("published", ""),
+        "descriptions": [{"lang": "en", "value": desc}],
+        "references": [
+            {"url": ref.get("url", ""), "name": "", "tags": [ref.get("type", "")]}
+            for ref in (vuln.get("references") or []) if isinstance(ref, dict)
+        ],
+        "affected": affected,
+        "configurations": [],
+        "weaknesses": [],
+        "_osv_ranges": osv_ranges,
+    }
+
+
+def _osv_search(name, limit=None):
+    """跨发行版生态查 OSV 组件漏洞，返回归一化记录。"""
+    out = []
+    for eco in OSV_ECOSYSTEMS:
+        payload = {"package": {"ecosystem": eco, "name": name}}
+        try:
+            resp = _sess.post(OSV_API_URL, json=payload, timeout=HTTP_TIMEOUT)
+            resp.raise_for_status()
+            for v in resp.json().get("vulns", []):
+                out.append(_osv_to_common(v))
+        except Exception:
+            continue
+    seen = {}
+    for c in out:
+        if c["id"]:
+            seen[c["id"]] = c
+    return list(seen.values())[:limit] if limit else list(seen.values())
 
 
 # ---------- 候选获取（按配置顺序，失败降级）----------
@@ -492,7 +550,10 @@ def _search_product(query, source_tag, max_results=20, version=None):
     if not re.search(r"[a-z]", fw["model_core"]) or len(fw["model_core"]) < 3:
         return []   # 泛化守卫
     source, candidates, errors = _get_candidates(fw, None, candidate_limit=COMPONENT_CANDIDATE_LIMIT)
-    if source is None:
+    if OSV_ENABLED:
+        osv_records = _osv_search(query, limit=COMPONENT_CANDIDATE_LIMIT)
+        candidates = (candidates or []) + osv_records
+    if not candidates:
         return []
     out = []
     for cve in candidates:
@@ -604,10 +665,15 @@ def _parse_component(comp):
 
 
 def _ver_key(v):
-    """版本号转可比较数值元组。'1.0.1f'/'v2.5' → (1,0,1)/(2,5)。无法解析返回 None。"""
+    """版本号转可比较数值元组。'1.0.1f'/'v2.5' → (1,0,1)/(2,5)。
+    处理 Debian 格式：'1:1.20.0-3'（epoch:版本-revision）→ (1,20,0)。无法解析返回 None。"""
     if v is None:
         return None
-    m = re.match(r"v?(\d+(?:[.\-]\d+)*)", str(v).strip().lower())
+    s = str(v).strip().lower()
+    if ":" in s:            # Debian epoch
+        s = s.split(":", 1)[1]
+    s = s.split("-")[0]     # Debian revision
+    m = re.match(r"v?(\d+(?:[.\-]\d+)*)", s)
     if not m:
         return None
     return tuple(int(x) for x in re.split(r"[.\-]", m.group(1)))
@@ -676,6 +742,7 @@ def _cve_version_ranges(cve):
                     ranges.append(("ge", str(m["versionStartIncluding"])))
                 if m.get("versionStartExcluding"):
                     ranges.append(("gt", str(m["versionStartExcluding"])))
+    ranges.extend(cve.get("_osv_ranges") or [])   # OSV 的 introduced/fixed
     return ranges
 
 
