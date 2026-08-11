@@ -624,7 +624,7 @@ def _components_key(component):
     """组件参数归一成字符串（列表排序，保证 hash 稳定）。"""
     if not component:
         return ""
-    if isinstance(component, str):
+    if isinstance(component, (str, dict)):
         return _component_str(component)
     return ",".join(sorted(_component_str(c) for c in component if c))
 
@@ -642,7 +642,7 @@ def _components_list(component):
     """组件参数归一成字符串列表（含版本，用于输出展示）。"""
     if not component:
         return []
-    comps = [component] if isinstance(component, str) else component
+    comps = [component] if isinstance(component, (str, dict)) else component
     return [_component_str(c) for c in comps if c]
 
 
@@ -687,8 +687,9 @@ def _ver_cmp(a, b):
     return (ka > kb) - (ka < kb)
 
 
-def _parse_range_string(s):
-    """解析版本范围字符串 '>= 0.10.50, < 0.10.80' → [('ge','0.10.50'),('lt','0.10.80')]。"""
+def _parse_range_string(s, default_op="eq"):
+    """解析版本范围字符串 '>= 0.10.50, < 0.10.80' → [('ge','0.10.50'),('lt','0.10.80')]。
+    default_op：纯版本（无操作符）时的默认操作符。"""
     out = []
     if not s or s in ("n/a", "*", "-"):
         return out
@@ -701,7 +702,7 @@ def _parse_range_string(s):
         else:
             m2 = re.match(r"v?\d[\d.\-]*", part)
             if m2:
-                out.append(("eq", m2.group(0)))
+                out.append((default_op, m2.group(0)))
     return out
 
 
@@ -724,7 +725,9 @@ def _cve_version_ranges(cve):
             if v.get("lessThan"):
                 ranges.append(("lt", str(v["lessThan"])))
             if v.get("version") and v.get("version") != "*":
-                ranges.extend(_parse_range_string(v["version"]))
+                # 有上下界时 version 是受影响起始版本(ge)；无界时才是精确版本(eq)
+                has_bound = bool(v.get("lessThanOrEqual") or v.get("lessThan"))
+                ranges.extend(_parse_range_string(v["version"], default_op="ge" if has_bound else "eq"))
     for cfg in (cve.get("configurations") or []):
         if not isinstance(cfg, dict):
             continue
@@ -892,7 +895,7 @@ def search_firmware(firmware_name, top_n=DEFAULT_TOP_N, download_poc=False, comm
 
     # 组件信息增强：顺带搜组件 CVE，合并去重（固件结果优先保留）
     if component and not cve_id:
-        comps = [component] if isinstance(component, str) else component
+        comps = [component] if isinstance(component, (str, dict)) else component
         for comp in comps:
             comp_name, comp_ver = _parse_component(comp)
             if not comp_name:
