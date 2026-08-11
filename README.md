@@ -52,7 +52,7 @@ python cve_search.py "D-Link DIR-850L" --download   # 顺带下载 PoC / with Po
 
 ## 功能 / Features
 
-- 固件 + 组件 → 相关 CVE（cve.org 主源 + NVD 兜底 + OSV 组件漏洞）/ firmware + component → CVEs (cve.org primary + NVD fallback + OSV component vulns)
+- 固件 + 组件 → 相关 CVE（cve.org 主源 + NVD 兜底 + OSV 组件漏洞）；组件带版本时按受影响版本精化 / firmware + component → CVEs (cve.org primary + NVD fallback + OSV component vulns); version-aware refinement when component includes a version
 - PoC 自动下载：GitHub、exploit-db、社区 PoC 补充、死链检测 / auto PoC download: GitHub, exploit-db, community supplement, dead-link detection
 - EPSS 危险评分（野外被利用概率，高危排前）/ EPSS exploit-probability scoring, high-risk first
 - 并发下载 + 限速预检 / concurrent downloads + rate-limit precheck
@@ -63,5 +63,8 @@ python cve_search.py "D-Link DIR-850L" --download   # 顺带下载 PoC / with Po
 ## 测试 / Testing
 
 ```bash
-python -m pytest test_robustness.py -v
+python -m pytest            # 全部测试：fuzz + 搜索集成 + 下载 + 缓存 + 单元
+python -m pytest --cov      # 带覆盖率
 ```
+
+37 个用例，CI 每次 push 自动运行（见顶部徽章）。
