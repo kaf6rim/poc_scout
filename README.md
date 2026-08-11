@@ -1,5 +1,7 @@
 # poc_scout
 
+![CI](https://github.com/kaf6rim/poc_scout/actions/workflows/test.yml/badge.svg)
+
 **IoT 固件漏洞情报 + PoC 自动下载的 MCP 工具，供 AI agent 直接调用。**
 
 **IoT firmware vulnerability intelligence + PoC auto-download, exposed as an MCP server for AI agents.**
