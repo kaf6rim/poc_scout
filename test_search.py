@@ -1,4 +1,6 @@
 """搜索模块集成测试：固件/组件/版本/EPSS，全部 mock 数据源，离线可跑。"""
+import cve_search
+import poc_downloader
 from cve_search import search_firmware, _parse_component, _components_list
 
 
@@ -91,3 +93,56 @@ def test_epss_affects_score(make_cve, fake_sources, tmp_output):
     assert top["epss_percentile"] == 0.99
     # 0.9 概率应显著加分
     assert top["score"] > 0.7
+
+
+# ---------- 精确 CVE 查 ----------
+
+def test_exact_cve_lookup(make_cve, fake_sources, tmp_output):
+    rec = make_cve("CVE-2024-0001", product="Test Device")
+    fake_sources(records=[rec])
+    r = search_firmware("CVE-2024-0001", force_refresh=True)
+    assert r["found"] is True
+    assert r["results"][0]["cve_id"] == "CVE-2024-0001"
+    assert r["results"][0]["from"] == "cve_id_exact"
+
+
+# ---------- NVD 兜底 ----------
+
+def test_nvd_fallback(monkeypatch, tmp_output, make_cve):
+    rec = make_cve("CVE-2024-0002", product="NVD Device")
+    monkeypatch.setitem(cve_search.PROVIDERS, "cveorg",
+                        lambda fw, cve_id, candidate_limit=None: (_ for _ in ()).throw(RuntimeError("down")))
+    monkeypatch.setitem(cve_search.PROVIDERS, "nvd",
+                        lambda fw, cve_id, candidate_limit=None: [rec])
+    monkeypatch.setattr(cve_search, "SEARCH_PROVIDERS", ["cveorg", "nvd"])
+    monkeypatch.setattr(cve_search, "_fetch_epss", lambda ids: {})
+    r = search_firmware("NVD Device", force_refresh=True)
+    assert r["source"] == "nvd"
+    assert r["results"][0]["cve_id"] == "CVE-2024-0002"
+
+
+def test_all_providers_down_honest(monkeypatch, tmp_output):
+    monkeypatch.setitem(cve_search.PROVIDERS, "cveorg",
+                        lambda fw, cve_id, candidate_limit=None: (_ for _ in ()).throw(RuntimeError("down")))
+    monkeypatch.setitem(cve_search.PROVIDERS, "nvd",
+                        lambda fw, cve_id, candidate_limit=None: (_ for _ in ()).throw(RuntimeError("down")))
+    monkeypatch.setattr(cve_search, "SEARCH_PROVIDERS", ["cveorg", "nvd"])
+    r = search_firmware("Test Device", force_refresh=True)
+    assert r["found"] is False
+    assert r.get("reason") == "provider_error"
+
+
+# ---------- 社区 POC 补充 ----------
+
+def test_community_poc(monkeypatch, tmp_output, make_cve, fake_sources):
+    fw = make_cve("CVE-2024-0001", product="Test Device")
+    fake_sources(records=[fw])
+    monkeypatch.setattr(cve_search, "github_quota_remaining", lambda: 50)   # 配额充足
+    monkeypatch.setattr(poc_downloader, "search_github_poc_repos",
+                        lambda cve_id, per_page=None: [("foo", "bar", 5)])
+    monkeypatch.setattr(poc_downloader, "list_repo_files", lambda owner, repo: (["poc.py"], 200))
+    monkeypatch.setattr(poc_downloader, "download_raw",
+                        lambda owner, repo, path: (b"#!/usr/bin/env python\nprint()", 200))
+    monkeypatch.setattr(poc_downloader.time, "sleep", lambda s: None)       # 跳过节流 sleep
+    r = search_firmware("Test Device", download_poc=True, community_poc=True, force_refresh=True)
+    assert r["results"][0].get("community_pocs"), "应有社区 POC 补充"
