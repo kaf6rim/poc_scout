@@ -2,69 +2,114 @@
 
 ![CI](https://github.com/kaf6rim/poc_scout/actions/workflows/test.yml/badge.svg)
 
-**IoT 固件漏洞情报 + PoC 自动下载的 MCP 工具，供 AI agent 直接调用。**
+**IoT firmware vulnerability intelligence, exposed as an MCP server for AI agents.**
+**物联网固件漏洞情报工具，以 MCP server 形式供 AI agent 使用。**
 
-**IoT firmware vulnerability intelligence + PoC auto-download, exposed as an MCP server for AI agents.**
+Input a firmware model (optionally with components) → get related CVEs ranked by exploit risk, with PoCs auto-downloaded to local disk. Pure APIs and rules — no LLM in the core.
 
----
+## Features
 
-## 是什么 / What it is
+- **Firmware + component → CVEs**: cve.org primary, NVD fallback, OSV component vulns
+- **Version-aware refinement**: when a component includes a version (e.g. `"openssl 1.0.1f"`), results are narrowed to the affected range
+- **PoC auto-download**: GitHub, exploit-db, community supplement, dead-link detection
+- **EPSS exploit-probability scoring**: high-risk CVEs rank first
+- **Concurrent downloads + rate-limit precheck**
+- **Result cache + download timestamps**
+- **Per-firmware CVE manifest** (`output/<firmware>/_cves.json`)
+- **Robustness tested** (Hypothesis fuzz + integration tests, CI on every push)
 
-**中文**：`poc_scout` 是物联网固件漏洞情报工具，以 MCP server 形式提供服务。AI agent 把固件型号名（可附带组件名）喂给它，它返回相关 CVE 列表，按危险评分排序，并自动下载 PoC 到本地。纯 API + 规则实现，核心不依赖大模型。
+## Data sources
 
-**English**: `poc_scout` is an IoT firmware vulnerability intelligence tool exposed as an MCP server. Feed it a firmware model (optionally with component names), and it returns the relevant CVEs ranked by risk score, then auto-downloads PoCs to local disk. Built with pure APIs and rules — no LLM in the core.
+| Source | Role |
+|---|---|
+| cve.org (restapiv1) | primary search |
+| NVD API | fallback |
+| OSV (osv.dev) | component vulnerabilities, precise version ranges |
+| FIRST.org EPSS | exploit-probability scoring |
+| GitHub / Exploit-DB | PoC download |
 
-## 快速开始 / Quick start
+## Install
 
 ```bash
 pip install -r requirements.txt
-python server.py          # MCP server（stdio transport）
 ```
 
-注册到 Claude Code / Register with Claude Code：
+## Usage as an MCP server
+
+Run the stdio MCP server:
+
+```bash
+python server.py
+```
+
+Register it with your MCP client. For example, with Claude Code:
 
 ```bash
 claude mcp add poc_scout -- python server.py
 ```
 
-命令行直接测 / CLI:
+Any MCP client that supports stdio servers can connect to it.
 
-```bash
-python cve_search.py "D-Link DIR-850L"              # 只搜 CVE / search only
-python cve_search.py "D-Link DIR-850L" --download   # 顺带下载 PoC / with PoC download
-```
-
-## MCP 工具 / MCP tool
+## MCP tool
 
 `search_cve_by_firmware(firmware_name, top_n=0, download_poc=False, community_poc=False, force_refresh=False, component=None)`
 
-| 参数 / Param | 说明 / Description |
+| Param | Description |
 |---|---|
-| `firmware_name` | 固件型号名，如 `"D-Link DIR-850L"`；也支持 CVE 编号 / firmware model, e.g. `"D-Link DIR-850L"`; CVE IDs also supported |
-| `component` | 固件内组件名（字符串/列表，如 `"busybox"`，可带版本 `"openssl 1.0.1f"`），信息增强；带版本时按受影响版本精化 / component names (str or list, e.g. `"busybox"`, or with version like `"openssl 1.0.1f"`); version-aware refinement when provided |
-| `download_poc` | 下载 PoC 到本地 / download PoCs to `output/` |
-| `community_poc` | 额外搜 GitHub 社区 PoC / also search GitHub community PoCs |
-| `top_n` | 返回条数，`0` = 全部 / max results, `0` = all |
-| `force_refresh` | 强制绕过结果缓存 / bypass result cache |
+| `firmware_name` | firmware model, e.g. `"D-Link DIR-850L"`; CVE IDs also supported |
+| `component` | component names (str or list, e.g. `"busybox"`, or with version `"openssl 1.0.1f"`); version-aware refinement |
+| `download_poc` | download PoCs to `output/` |
+| `community_poc` | also search GitHub community PoCs |
+| `top_n` | max results, `0` = all |
+| `force_refresh` | bypass result cache |
 
-> **限速说明 / Rate limits**：GitHub API 未认证限速 60 次/小时。批量下载 PoC 时，可配合**轮换 IP** 或配置 **`GITHUB_TOKEN`**（配额升至 5000/h）缓解。
-> *Unauthenticated GitHub API is limited to 60 req/h. For bulk PoC downloads, use **rotating IPs** or set **`GITHUB_TOKEN`** (raises the quota to 5000/h).*
+### Example output
 
-## 功能 / Features
-
-- 固件 + 组件 → 相关 CVE（cve.org 主源 + NVD 兜底 + OSV 组件漏洞）；组件带版本时按受影响版本精化 / firmware + component → CVEs (cve.org primary + NVD fallback + OSV component vulns); version-aware refinement when component includes a version
-- PoC 自动下载：GitHub、exploit-db、社区 PoC 补充、死链检测 / auto PoC download: GitHub, exploit-db, community supplement, dead-link detection
-- EPSS 危险评分（野外被利用概率，高危排前）/ EPSS exploit-probability scoring, high-risk first
-- 并发下载 + 限速预检 / concurrent downloads + rate-limit precheck
-- 结果缓存 + 下载时间戳 / result cache + download timestamps
-- CVE 编号清单 `output/<固件>/_cves.json` / per-firmware CVE manifest `output/<firmware>/_cves.json`
-- 鲁棒性测试（Hypothesis fuzz）/ robustness tests (Hypothesis fuzz)
-
-## 测试 / Testing
-
-```bash
-python -m pytest            # 全部测试：fuzz + 搜索集成 + 下载 + 缓存 + 单元
-python -m pytest --cov      # 带覆盖率
+```json
+{
+  "firmware": "D-Link DIR-850L",
+  "components": ["busybox 1.19.4"],
+  "found": true,
+  "result_count": 40,
+  "results": [
+    {
+      "cve_id": "CVE-2026-38752",
+      "from": "component:busybox",
+      "version_match": true,
+      "score": 0.746,
+      "epss": 0.64,
+      "description": "A use-after-free in the awk_sub() function..."
+    }
+  ]
+}
 ```
 
-37 个用例，CI 每次 push 自动运行（见顶部徽章）。
+## CLI
+
+```bash
+python cve_search.py "D-Link DIR-850L"              # search only
+python cve_search.py "D-Link DIR-850L" --download   # with PoC download
+```
+
+> **Rate limits**: Unauthenticated GitHub API is limited to 60 req/h. For bulk PoC downloads, use **rotating IPs** or set **`GITHUB_TOKEN`** (raises the quota to 5000/h).
+
+## Testing
+
+```bash
+python -m pytest            # all tests: fuzz + integration + download + cache + units
+python -m pytest --cov      # with coverage
+```
+
+37 tests, CI runs on every push (badge above).
+
+## Project layout
+
+```
+server.py            # MCP server entry
+cve_search.py        # search: providers, matching, scoring, EPSS, cache
+poc_downloader.py    # PoC download: GitHub / exploit-db / community
+proxy.py             # proxy strategy + IP rotation
+config.py            # configuration
+cache.py             # local hash cache
+test_*.py            # test suite
+```
