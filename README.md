@@ -102,6 +102,10 @@ python -m pytest --cov      # with coverage
 
 37 tests, CI runs on every push (badge above).
 
+## License
+
+[GNU AGPL v3](LICENSE)
+
 ## Project layout
 
 ```
