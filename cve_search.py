@@ -406,7 +406,10 @@ def classify_reference(ref):
         return False, ""
     url = str(ref.get("url") or "").lower()
     name = str(ref.get("source") or ref.get("name") or "").lower()
-    tags = [str(t).lower() for t in (ref.get("tags") or []) if t is not None]
+    tags_val = ref.get("tags") or []
+    if not isinstance(tags_val, list):
+        tags_val = []
+    tags = [str(t).lower() for t in tags_val if t is not None]
 
     if "exploit" in tags:
         return True, "tag"
