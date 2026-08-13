@@ -20,10 +20,12 @@ def test_github_download_writes_file(fake_github, tmp_output):
     assert ref.get("poc_local"), "应有本地路径"
     assert ref.get("download_status") == "ok"
     assert ref.get("downloaded_at"), "应有下载时间戳"
-    # 文件确实落盘
-    base = os.path.join(tmp_output, "Test_Device", "CVE-2024-0001")
+    # 文件确实落盘（扁平：直接放固件目录，文件名带 CVE 前缀）
+    base = os.path.join(tmp_output, "Test_Device")
     assert os.path.isdir(base)
-    assert os.listdir(base), "目录应有文件"
+    files = os.listdir(base)
+    assert files, "目录应有文件"
+    assert any(f.startswith("CVE-2024-0001_") for f in files), "文件名应带 CVE 前缀"
 
 
 def test_github_dead_link_detected(fake_github, tmp_output):

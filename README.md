@@ -13,9 +13,10 @@ Input a firmware model (optionally with components) → get related CVEs ranked 
 - **Version-aware refinement**: when a component includes a version (e.g. `"openssl 1.0.1f"`), results are narrowed to the affected range
 - **PoC auto-download**: GitHub, exploit-db, community supplement, dead-link detection
 - **EPSS exploit-probability scoring**: high-risk CVEs rank first
+- **CVSS severity** per CVE (NVD → cve.org → OSV authority order, NVD backfill when cve.org lacks metrics)
 - **Concurrent downloads + rate-limit precheck**
 - **Result cache + download timestamps**
-- **Per-firmware CVE manifest** (`output/<firmware>/_cves.json`)
+- **Structured per-firmware output**: `main.json` (per-CVE info rows) + `<CVE-ID>.json` (full PoCs with base64 content) + flattened PoC files
 - **Robustness tested** (Hypothesis fuzz + integration tests, CI on every push)
 
 ## Data sources
@@ -76,6 +77,8 @@ Any MCP client that supports stdio servers can connect to it.
       "cve_id": "CVE-2026-38752",
       "from": "component:busybox",
       "version_match": true,
+      "severity": "HIGH",
+      "severity_score": 8.8,
       "score": 0.746,
       "epss": 0.64,
       "description": "A use-after-free in the awk_sub() function..."
@@ -83,6 +86,31 @@ Any MCP client that supports stdio servers can connect to it.
   ]
 }
 ```
+
+## Output structure
+
+Results are written under `output/<firmware>/` (one folder per firmware; a CVE-ID query uses `output/<CVE-ID>/`):
+
+```
+output/<firmware>/
+├── main.json              # per-CVE info rows (all CVEs, not truncated to top_n)
+├── <CVE-ID>.json          # one per CVE with PoC references: full PoC info
+└── CVE-<id>_poc_<n>_<name>.<ext>   # flattened PoC files, prefixed with CVE ID
+```
+
+**`main.json`** — one row per CVE:
+
+| Field | Meaning |
+|---|---|
+| `cve_id` / `cve_url` / `nvd_url` / `published` / `description` / `cwe` | CVE identity |
+| `severity` / `severity_score` | CVSS, authority order NVD → cve.org → OSV (NVD backfilled when cve.org lacks metrics) |
+| `extra` | site-specific fields (e.g. `provider`, `datePublic`, `vulnStatus`, `nvd_severity`) |
+| `from` / `version_match` | source (`firmware` / `component:<name>`) + affected-version match |
+| `score` / `match_reasons` / `epss` / `epss_percentile` | ranking info |
+| `poc_count` / `poc` | PoC count; file names (`null` when none) |
+| `poc_references` | summary of every PoC reference (URL, source, local file, download status) |
+
+**`<CVE-ID>.json`** — full PoCs for that CVE: each entry has URL / source / local file / download timestamp / **base64 `content`** (link-only entries have `content: null`). PoCs that were never downloaded or link-only are still listed.
 
 ## CLI
 
@@ -100,7 +128,7 @@ python -m pytest            # all tests: fuzz + integration + download + cache +
 python -m pytest --cov      # with coverage
 ```
 
-37 tests, CI runs on every push (badge above).
+43 tests, CI runs on every push (badge above).
 
 ## License
 

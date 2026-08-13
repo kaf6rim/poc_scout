@@ -1,6 +1,7 @@
 # cve_search.py —— 搜索模块：固件型号 → 相关 CVE 列表
 # 核心不用大模型：keyword 粗筛 + 本地归一化 token 精确过滤 + 启发式打分
 # 数据源：cve.org restapiv1（主，免鉴权）→ NVD（兜底），配置顺序可调
+import base64
 import hashlib
 import json
 import os
@@ -134,6 +135,11 @@ def _cveorg_to_common(src):
             for pt in cna.get("problemTypes", []) or []
             for d in pt.get("descriptions", []) or []
         ],
+        "metrics": cna.get("metrics", []) or [],
+        "_source_extra": {
+            "datePublic": cna.get("datePublic"),
+            "provider": (cna.get("providerMetadata") or {}).get("shortName"),
+        },
     }
 
 
@@ -250,6 +256,11 @@ def _osv_to_common(vuln):
         "configurations": [],
         "weaknesses": [],
         "_osv_ranges": osv_ranges,
+        "_osv_severity": vuln.get("severity"),
+        "_source_extra": {
+            "osv_id": vid,
+            "osv_ecosystem_specific": affected[0].get("ecosystem_specific") if affected else None,
+        },
     }
 
 
@@ -427,6 +438,47 @@ def classify_reference(ref):
     return False, ""
 
 
+def _extract_severity(cve):
+    """从 CVE 记录提取 CVSS 等级和分数。返回 (severity, score) 或 (None, None)。
+    优先级：NVD metrics → cve.org metrics → OSV severity。"""
+    metrics = cve.get("metrics")
+    # NVD: cve["metrics"] = {"cvssMetricV31": [{"baseSeverity","baseScore"}]}
+    if isinstance(metrics, dict):
+        for key in ("cvssMetricV40", "cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
+            for m in metrics.get(key, []) or []:
+                if not isinstance(m, dict):
+                    continue
+                base = m.get("baseSeverity") or (m.get("cvssData") or {}).get("baseSeverity")
+                score = m.get("baseScore") or (m.get("cvssData") or {}).get("baseScore")
+                if base or score:
+                    return base, score
+    # cve.org: cve["metrics"] = [{"cvssV3_1": {"baseScore","baseSeverity"}}]
+    elif isinstance(metrics, list):
+        for m in metrics:
+            if not isinstance(m, dict):
+                continue
+            for key in ("cvssV4_0", "cvssV3_1", "cvssV3_0", "cvssV2"):
+                d = m.get(key)
+                if isinstance(d, dict) and (d.get("baseSeverity") or d.get("baseScore")):
+                    return d.get("baseSeverity"), d.get("baseScore")
+    # OSV: cve["_osv_severity"] = [{"type","score"}]
+    sev = cve.get("_osv_severity")
+    if sev:
+        for s in (sev if isinstance(sev, list) else [sev]):
+            if isinstance(s, dict) and (s.get("type") or s.get("score")):
+                return s.get("type"), s.get("score")
+    return None, None
+
+
+def _collect_extra(cve):
+    """收集源独有字段（extra 兜底）。"""
+    extra = dict(cve.get("_source_extra") or {})
+    for k in ("vulnStatus", "cveTags", "lastModified"):
+        if cve.get(k) is not None:
+            extra[k] = cve[k]
+    return extra or None
+
+
 def build_result(cve):
     cve_id = cve["id"]
     desc = " ".join(
@@ -448,6 +500,7 @@ def build_result(cve):
             "poc_source": src if is_poc else "none",
         })
 
+    severity, severity_score = _extract_severity(cve)
     return {
         "cve_id": cve_id,
         "cve_url": CVE_RECORD_URL.format(cve_id=cve_id),
@@ -455,6 +508,9 @@ def build_result(cve):
         "published": str(cve.get("published") or ""),
         "description": desc[:DESCRIPTION_EXCERPT_LEN],
         "cwe": _weaknesses(cve),
+        "severity": severity,
+        "severity_score": severity_score,
+        "extra": _collect_extra(cve),
         "references": refs,
     }
 
@@ -546,6 +602,23 @@ def _apply_epss(results):
         r["score"] = round(min(r["score"] + EPSS_WEIGHT * hit[0], 1.0), 3)
 
 
+def _nvd_severity_fill(result):
+    """对缺 CVSS 的 CVE 用 NVD 补查严重等级（NVD 是最权威来源，cve.org 主源 CNA 常不提交 metrics）。
+    失败静默跳过，不崩任务。extra 标记 nvd_severity 标明补查来源。"""
+    try:
+        for v in _nvd_search(cve_id=result["cve_id"], limit=1).get("vulnerabilities", []):
+            sev, score = _extract_severity(v["cve"])
+            if sev or score:
+                result["severity"] = sev
+                result["severity_score"] = score
+                extra = result.get("extra")
+                if isinstance(extra, dict):
+                    extra["nvd_severity"] = True
+                return
+    except Exception:
+        pass
+
+
 def _search_product(query, source_tag, max_results=20, version=None):
     """搜一个产品名（固件或组件），返回带 from 标记的 scored 结果（截断 max_results）。
     version 提供时做受影响版本匹配：明确不受影响的剔除，命中的加分。"""
@@ -579,37 +652,70 @@ def _search_product(query, source_tag, max_results=20, version=None):
     return out[:max_results]
 
 
-def _write_manifest(manifest_dir, firmware_name, source, scored):
-    """把固件涉及的全部 CVE 编号清单写入 output/<固件>/_cves.json（不受 top_n 截断）。"""
+def _main_cve_entry(x):
+    """单个 CVE 的信息栏：通用字段扁平化（组件 from/version_match 也在内），
+    poc 无则 null、有则文件名列表，poc 的 reference 摘要一并记录。"""
+    poc_files, poc_refs = [], []
+    for ref in (x.get("references") or []):
+        if not ref.get("is_poc"):
+            continue
+        poc_refs.append({
+            "url": str(ref.get("url") or ""),
+            "name": str(ref.get("name") or ""),
+            "source": ref.get("poc_source"),
+            "poc_local": [os.path.basename(p) for p in (ref.get("poc_local") or [])],
+            "download_status": ref.get("download_status"),
+            "download_skipped": ref.get("download_skipped"),
+            "downloaded_at": ref.get("downloaded_at"),
+        })
+        poc_files.extend(os.path.basename(p) for p in (ref.get("poc_local") or []))
+    for c in (x.get("community_pocs") or []):
+        poc_files.extend(os.path.basename(p) for p in (c.get("poc_local") or []))
+        poc_refs.append({
+            "url": c.get("url"),
+            "name": c.get("repo"),
+            "source": "community",
+            "poc_local": [os.path.basename(p) for p in (c.get("poc_local") or [])],
+            "download_status": "ok",
+            "download_skipped": None,
+            "downloaded_at": c.get("downloaded_at"),
+        })
+    return {
+        "cve_id": x["cve_id"],
+        "cve_url": x.get("cve_url"),
+        "nvd_url": x.get("nvd_url"),
+        "published": x.get("published"),
+        "description": x.get("description"),
+        "cwe": x.get("cwe"),
+        "severity": x.get("severity"),
+        "severity_score": x.get("severity_score"),
+        "extra": x.get("extra"),
+        "score": x.get("score"),
+        "match_reasons": x.get("match_reasons", []),
+        "epss": x.get("epss"),
+        "epss_percentile": x.get("epss_percentile"),
+        "from": x.get("from"),
+        "version_match": x.get("version_match"),
+        "poc_count": len(poc_files),
+        "poc": poc_files or None,
+        "poc_references": poc_refs or None,
+    }
+
+
+def _write_main_json(manifest_dir, firmware_name, source, scored, components=None):
+    """写 output/<固件>/main.json：每个 CVE 的信息栏（severity/poc 状态/组件/extra 扁平汇总）。
+    取代旧 _cves.json，不受 top_n 截断（全量）。"""
     if not scored:
         return
-    path = os.path.join(OUTPUT_DIR, manifest_dir, "_cves.json")
+    path = os.path.join(OUTPUT_DIR, manifest_dir, "main.json")
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         manifest = {
             "firmware": firmware_name,
             "source": source,
             "total_cves": len(scored),
-            "cves": [
-                {
-                    "cve_id": x["cve_id"],
-                    "score": x["score"],
-                    "match_reasons": x.get("match_reasons", []),
-                    "poc_downloaded": any(
-                        ref.get("poc_local") for ref in x["references"] if ref.get("is_poc")
-                    ),
-                    "downloaded_at": next(
-                        (ref.get("downloaded_at") for ref in x["references"] if ref.get("poc_local")), None
-                    ),
-                    "poc_links": [ref["url"] for ref in x["references"] if ref.get("is_poc")],
-                    "epss": x.get("epss"),
-                    "community_pocs": [
-                        {"repo": c.get("repo"), "url": c.get("url"), "stars": c.get("stars")}
-                        for c in x.get("community_pocs", [])
-                    ],
-                }
-                for x in scored
-            ],
+            "components": components or [],
+            "cves": [_main_cve_entry(x) for x in scored],
         }
         with open(path, "w", encoding="utf-8") as f:
             json.dump(manifest, f, ensure_ascii=False, indent=2)
@@ -617,9 +723,82 @@ def _write_manifest(manifest_dir, firmware_name, source, scored):
         pass
 
 
+def _write_cve_poc_json(manifest_dir, scored):
+    """每个 CVE 一个 json：该 CVE 全量 poc——下载成功的带 base64 内容，仅记链接的只给元数据。
+    无任何 poc 记录的 CVE 不写文件。"""
+    for x in (scored or []):
+        entries = []
+        for ref in (x.get("references") or []):
+            if not ref.get("is_poc"):
+                continue
+            local = ref.get("poc_local") or []
+            if local:
+                for p in local:
+                    entries.append(_poc_entry(p, {
+                        "url": ref.get("url"),
+                        "name": ref.get("name"),
+                        "source": ref.get("poc_source"),
+                        "downloaded_at": ref.get("downloaded_at"),
+                    }))
+            else:
+                entries.append({
+                    "url": ref.get("url"),
+                    "name": ref.get("name"),
+                    "source": ref.get("poc_source"),
+                    "local_file": None,
+                    "downloaded_at": None,
+                    "content_encoding": None,
+                    "content": None,
+                    "download_status": ref.get("download_status"),
+                    "download_skipped": ref.get("download_skipped"),
+                })
+        for c in (x.get("community_pocs") or []):
+            for p in (c.get("poc_local") or []):
+                entries.append(_poc_entry(p, {
+                    "url": c.get("url"),
+                    "name": c.get("repo"),
+                    "source": "community",
+                    "downloaded_at": c.get("downloaded_at"),
+                    "stars": c.get("stars"),
+                }))
+        if not entries:
+            continue   # 无 poc 记录的 CVE 不写空 json
+        path = os.path.join(OUTPUT_DIR, manifest_dir, f"{x['cve_id']}.json")
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"cve_id": x["cve_id"], "poc_count": len(entries), "pocs": entries},
+                          f, ensure_ascii=False, indent=2)
+        except OSError:
+            pass
+
+
+def _poc_entry(path, meta):
+    """单个 poc 文件的信息栏：元数据 + base64 内容（读文件失败内容为 null，不崩）。"""
+    content = None
+    try:
+        with open(path, "rb") as f:
+            content = base64.b64encode(f.read()).decode("ascii")
+    except OSError:
+        pass
+    entry = {
+        "url": meta.get("url"),
+        "name": meta.get("name"),
+        "source": meta.get("source"),
+        "local_file": os.path.basename(path),
+        "downloaded_at": meta.get("downloaded_at"),
+        "content_encoding": "base64" if content is not None else None,
+        "content": content,
+    }
+    if meta.get("stars") is not None:
+        entry["stars"] = meta["stars"]
+    return entry
+
+
 def _query_hash(firmware_name, download_poc, community_poc, component=None):
-    """结果缓存的身份标识：防目录名碰撞（不同输入可能 sanitize 成同名目录）。"""
-    key = f"{firmware_name}|{download_poc}|{community_poc}|{_components_key(component)}"
+    """结果缓存的身份标识：防目录名碰撞（不同输入可能 sanitize 成同名目录）。
+    v2 前缀：输出结构重构后使旧缓存失效（旧缓存不含 severity 补查/新结构）。"""
+    key = f"v2|{firmware_name}|{download_poc}|{community_poc}|{_components_key(component)}"
     return hashlib.sha1(key.encode("utf-8")).hexdigest()
 
 
@@ -918,6 +1097,12 @@ def search_firmware(firmware_name, top_n=DEFAULT_TOP_N, download_poc=False, comm
 
     scored_all = scored
 
+    # CVSS 补查：cve.org 主源 CNA 常不提交 metrics → 缺 severity 的 CVE 并发补查 NVD（最权威）
+    missing = [r for r in scored_all if not r.get("severity")]
+    if missing:
+        with ThreadPoolExecutor(max_workers=DOWNLOAD_CONCURRENCY) as ex:
+            list(ex.map(_nvd_severity_fill, missing))
+
     if top_n and top_n > 0:
         scored = scored[:top_n]
 
@@ -932,18 +1117,21 @@ def search_firmware(firmware_name, top_n=DEFAULT_TOP_N, download_poc=False, comm
                         ref["poc_local"] = []
                         ref["download_skipped"] = notice
         # 并发下载：GitHub 引用若被预标记则快速跳过，其他源正常下（有界，尊重限速）
+        # poc 扁平落在结果目录 manifest_dir 下（固件→固件目录，精确 CVE→CVE 目录）
         with ThreadPoolExecutor(max_workers=DOWNLOAD_CONCURRENCY) as ex:
-            futures = [ex.submit(download_poc_for_cve, r, fw_dir) for r in scored]
+            futures = [ex.submit(download_poc_for_cve, r, manifest_dir) for r in scored]
             for fut in futures:
                 fut.result()
         # 社区 POC 补充：配额正常时，对无官方 POC 的 CVE 搜 GitHub（串行节流）
         if community_poc and not notice:
             for r in scored:
-                community_poc_supplement(r, fw_dir)
+                community_poc_supplement(r, manifest_dir)
 
-    # 固件涉及的全部 CVE 编号清单落盘（全量；下载完成后写，poc_downloaded 反映真实状态）
+    # 输出落盘（全量，不受 top_n 截断；下载完成后写，poc 状态反映真实情况）：
+    # main.json = 每个 CVE 信息栏汇总；<CVE编号>.json = 该 CVE 全量 poc（含内容）
     if scored_all:
-        _write_manifest(manifest_dir, raw, source, scored_all)
+        _write_main_json(manifest_dir, raw, source, scored_all, _components_list(component))
+        _write_cve_poc_json(manifest_dir, scored_all)
 
     # 完整结果（存缓存用，全量不截断）
     out_full = {

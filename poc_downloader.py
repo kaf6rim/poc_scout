@@ -146,7 +146,7 @@ def _sniff_ext(content):
     return None
 
 
-def _download_repo(owner, repo, cve_dir):
+def _download_repo(owner, repo, cve_dir, cve_id):
     """列树→过滤 POC 文件→下 raw（官方引用和社区补充共用）。返回 (local_paths, skip_reason)。"""
     files, status = list_repo_files(owner, repo)
     if status in (403, 429):
@@ -164,24 +164,24 @@ def _download_repo(owner, repo, cve_dir):
         if st != 200 or not content or len(content) > MAX_POC_FILE_BYTES:
             continue
         base = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(p)) or "poc"
-        out = os.path.join(cve_dir, f"poc_{i}_{base}")
+        out = os.path.join(cve_dir, f"{cve_id}_poc_{i}_{base}")
         with open(out, "wb") as f:
             f.write(content)
         local.append(out)
     return local, (None if local else "文件下载失败")
 
 
-def _download_github_ref(ref, cve_dir):
+def _download_github_ref(ref, cve_dir, cve_id):
     blob = _parse_github_blob(ref["url"])
     if blob:
-        _download_github_blob(ref, cve_dir, blob)
+        _download_github_blob(ref, cve_dir, blob, cve_id)
         return
     gh = _parse_github(ref["url"])
     if not gh:
         ref["poc_local"] = []
         ref["download_skipped"] = "无法解析 GitHub 仓库"
         return
-    local, skip = _download_repo(gh[0], gh[1], cve_dir)
+    local, skip = _download_repo(gh[0], gh[1], cve_dir, cve_id)
     ref["poc_local"] = local
     if local:
         ref["download_status"] = "ok"
@@ -191,7 +191,7 @@ def _download_github_ref(ref, cve_dir):
         ref["download_skipped"] = skip
 
 
-def _download_github_blob(ref, cve_dir, blob):
+def _download_github_blob(ref, cve_dir, blob, cve_id):
     """blob 型引用：指向具体文件，直接检查该文件是否存活。
     文件被删（404）→ 诚实标注"引用已失效"，而不是笼统说"无 POC 代码文件"。"""
     owner, repo, path = blob
@@ -219,7 +219,7 @@ def _download_github_blob(ref, cve_dir, blob):
         ref["download_skipped"] = f"引用文件下载失败 status={st}"
         return
     safe = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(path)) or "poc"
-    out = os.path.join(cve_dir, f"poc_1_{safe}")
+    out = os.path.join(cve_dir, f"{cve_id}_poc_1_{safe}")
     with open(out, "wb") as f:
         f.write(content)
     ref["poc_local"] = [out]
@@ -227,7 +227,7 @@ def _download_github_blob(ref, cve_dir, blob):
     ref["downloaded_at"] = _now()
 
 
-def _download_exploitdb_ref(ref, cve_dir):
+def _download_exploitdb_ref(ref, cve_dir, cve_id):
     m = EXPLOITDB_RE.search(ref["url"])
     if not m:
         ref["poc_local"] = []
@@ -250,7 +250,7 @@ def _download_exploitdb_ref(ref, cve_dir):
 
     os.makedirs(cve_dir, exist_ok=True)   # 有文件要写才建目录
     ext = _sniff_ext(resp.content) or _ext_from_content_type(resp)
-    out = os.path.join(cve_dir, f"poc_1_exploitdb_{eid}{ext}")
+    out = os.path.join(cve_dir, f"{cve_id}_poc_1_exploitdb_{eid}{ext}")
     with open(out, "wb") as f:
         f.write(resp.content)
     ref["poc_local"] = [out]
@@ -261,9 +261,10 @@ def _download_exploitdb_ref(ref, cve_dir):
 def download_poc_for_cve(result, firmware_dir):
     """对单个 CVE 结果里的 POC 引用下载，就地更新 result['references']。
     按源分发：GitHub（列树→挑代码→下 raw）/ exploit-db（下载原始 exploit）/ 其他只记链接。
-    每个引用补字段：poc_local / download_skipped / download_status。"""
+    每个引用补字段：poc_local / download_skipped / download_status。
+    poc 文件扁平落在结果目录（firmware_dir）下，文件名带 CVE 前缀。"""
     cve_id = result["cve_id"]
-    cve_dir = os.path.join(OUTPUT_DIR, firmware_dir, cve_id)
+    cve_dir = os.path.join(OUTPUT_DIR, firmware_dir)
 
     for ref in result["references"]:
         if not ref.get("is_poc"):
@@ -273,9 +274,9 @@ def download_poc_for_cve(result, firmware_dir):
         try:
             url = (ref.get("url") or "").lower()
             if "github.com" in url:
-                _download_github_ref(ref, cve_dir)
+                _download_github_ref(ref, cve_dir, cve_id)
             elif "exploit-db.com" in url:
-                _download_exploitdb_ref(ref, cve_dir)
+                _download_exploitdb_ref(ref, cve_dir, cve_id)
             else:
                 ref["poc_local"] = []
                 ref["download_skipped"] = "非代码型源（文章/公告/邮件列表），只记链接"
@@ -333,10 +334,10 @@ def community_poc_supplement(result, fw_dir):
     repos = search_github_poc_repos(cve_id)
     if not repos:
         return result
-    cve_dir = os.path.join(OUTPUT_DIR, fw_dir, cve_id)
+    cve_dir = os.path.join(OUTPUT_DIR, fw_dir)
     result.setdefault("community_pocs", [])
     for owner, repo, stars in repos:
-        local, skip = _download_repo(owner, repo, cve_dir)
+        local, skip = _download_repo(owner, repo, cve_dir, cve_id)
         if local:
             result["community_pocs"].append({
                 "repo": f"{owner}/{repo}",

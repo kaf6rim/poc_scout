@@ -11,3 +11,8 @@ __pycache__/
 
 # 测试
 .pytest_cache/
+.coverage
+.hypothesis/
+
+# 本地设置（个人）
+.claude/settings.local.json
