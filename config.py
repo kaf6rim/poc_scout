@@ -36,10 +36,18 @@ DESCRIPTION_EXCERPT_LEN = 300
 
 # ---------- GitHub 代理与鉴权 ----------
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
-# PROXY_MODE: direct=直连 / fixed=FlClash 固定代理（默认，用户选择用代理池）/ kuaidaili=快代理池(留 stub)
+# PROXY_MODE: direct=直连 / fixed=FlClash 固定代理（默认，用户选择用代理池）/ kuaidaili=快代理 API 代理池
 PROXY_MODE = os.environ.get("PROXY_MODE", "fixed")
 PROXY_URL = os.environ.get("PROXY_URL", "http://127.0.0.1:7890")  # FlClash 混合端口
 FLCLASH_CONTROLLER = os.environ.get("FLCLASH_CONTROLLER", "http://127.0.0.1:9090")  # FlClash 外部控制器（自动换节点用）
+
+# ---------- 快代理（kuaidaili）API 代理池 ----------
+# 动态代理提取：dps API 拉 ip:port 列表 → 池子轮换。无 orderid 时 kuaidaili 模式优雅降级直连。
+KUAIDAILI_ORDERID = os.environ.get("KUAIDAILI_ORDERID", "")     # 快代理订单号（dps 提取需要）
+KUAIDAILI_SECRET = os.environ.get("KUAIDAILI_SECRET", "")       # 签名密钥（白名单 IP 订单可不填）
+KUAIDAILI_API_URL = os.environ.get("KUAIDAILI_API_URL", "https://dps.kdlapi.com/api/getdps")
+KUAIDAILI_NUM = int(os.environ.get("KUAIDAILI_NUM", "10"))       # 每次提取 IP 数
+KUAIDAILI_POOL_MIN = int(os.environ.get("KUAIDAILI_POOL_MIN", "3"))  # 池子低于此阈值自动刷新
 MAX_POC_FILES_PER_REPO = 5
 MAX_POC_FILE_BYTES = 2 * 1024 * 1024
 # 并发下载 worker 数：有界，尊重 GitHub 限速；配额充足时并发把网络等待并行掉

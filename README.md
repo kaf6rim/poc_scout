@@ -119,7 +119,63 @@ python cve_search.py "D-Link DIR-850L"              # search only
 python cve_search.py "D-Link DIR-850L" --download   # with PoC download
 ```
 
-> **Rate limits**: Unauthenticated GitHub API is limited to 60 req/h. For bulk PoC downloads, use **rotating IPs** or set **`GITHUB_TOKEN`** (raises the quota to 5000/h).
+> **Rate limits**: Unauthenticated GitHub API is limited to 60 req/h. For bulk PoC downloads, set **`GITHUB_TOKEN`** (5000/h) or enable rotating IPs (below).
+
+## Proxies
+
+PoC downloads hit the GitHub API, which is rate-limited (60 req/h unauthenticated, 5000/h with a token). If you hit 403/429/502, `rotate_ip()` automatically switches the egress IP before retrying — for `fixed` it switches the FlClash node, for `kuaidaili` it pulls the next IP from the proxy pool. All configuration is done through environment variables — no code changes needed.
+
+### Environment variables
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PROXY_MODE` | `fixed` | proxy strategy: `direct` / `fixed` / `kuaidaili` |
+| `PROXY_URL` | `http://127.0.0.1:7890` | FlClash mixed port (fixed mode) |
+| `FLCLASH_CONTROLLER` | `http://127.0.0.1:9090` | FlClash external controller (for automatic node rotation) |
+| `GITHUB_TOKEN` | *(empty)* | GitHub token — raises the API quota to 5000/h |
+| `KUAIDAILI_ORDERID` | *(empty)* | Kuaidaili order ID |
+| `KUAIDAILI_SECRET` | *(empty)* | Kuaidaili signature secret (skip when the order uses an IP whitelist) |
+| `KUAIDAILI_API_URL` | `https://dps.kdlapi.com/api/getdps` | Kuaidaili extraction API endpoint |
+| `KUAIDAILI_NUM` | `10` | IPs pulled from the API per request |
+| `KUAIDAILI_POOL_MIN` | `3` | refresh the pool when it drops below this many |
+
+### Mode `direct` — no proxy
+
+GitHub is accessed directly; no rotation on rate limits.
+
+```bash
+export PROXY_MODE=direct
+```
+
+### Mode `fixed` — FlClash (default)
+
+Pick this when FlClash (or another Clash core) is already running. Requests go through its mixed port; on 403/429/502 the tool switches the active node via the controller (auto-detects the traffic group, verifies the egress IP actually changed).
+
+```bash
+export PROXY_MODE=fixed
+export PROXY_URL=http://127.0.0.1:7890            # FlClash mixed port
+export FLCLASH_CONTROLLER=http://127.0.0.1:9090   # FlClash external controller
+```
+
+`PROXY_URL` also accepts a credential form `http://user:pass@host:port` for proxies that require authentication.
+
+### Mode `kuaidaili` — Kuaidaili API proxy pool
+
+Requests go through an internal pool of `ip:port` proxies pulled from the Kuaidaili dynamic-proxy API. Dead proxies are skipped automatically and the pool refills itself when it runs low.
+
+```bash
+export PROXY_MODE=kuaidaili
+export KUAIDAILI_ORDERID=<your order ID>     # required
+export KUAIDAILI_SECRET=<your secret>        # only if the order requires a signature
+# optional:
+# export KUAIDAILI_API_URL=https://dps.kdlapi.com/api/getdps
+# export KUAIDAILI_NUM=10
+# export KUAIDAILI_POOL_MIN=3
+```
+
+Without `KUAIDAILI_ORDERID`, the `kuaidaili` mode **degrades to direct** instead of erroring, so it is safe to leave enabled.
+
+> **Kuaidaili product types.** Kuaidaili sells two proxy styles. This tool implements the **extraction API** style (`orderid` → API returns a list of `ip:port`). If you use the **tunnel** style instead (a fixed `host:port` plus username/password, with IP rotation done on Kuaidaili's side), configure it as `fixed` mode with `PROXY_URL=http://user:pass@host:port` — no order ID or pool involved. Check your Kuaidaili console to see which product you have.
 
 ## Testing
 
