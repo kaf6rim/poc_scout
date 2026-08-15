@@ -89,7 +89,7 @@ Any MCP client that supports stdio servers can connect to it.
 
 ## Output structure
 
-Results are written under `output/<firmware>/` (one folder per firmware; a CVE-ID query uses `output/<CVE-ID>/`):
+Results are written under `output/<firmware>/` (one folder per firmware; a CVE-ID query uses `output/<CVE-ID>/`). The result cache lives in `cache/result_<hash>.json` — keyed by query hash, not in the output folder:
 
 ```
 output/<firmware>/
@@ -110,7 +110,7 @@ output/<firmware>/
 | `poc_count` / `poc` | PoC count; file names (`null` when none) |
 | `poc_references` | summary of every PoC reference (URL, source, local file, download status) |
 
-**`<CVE-ID>.json`** — full PoCs for that CVE: each entry has URL / source / local file / download timestamp / **base64 `content`** (link-only entries have `content: null`). PoCs that were never downloaded or link-only are still listed.
+**`<CVE-ID>.json`** — full PoCs for that CVE: each entry has URL / source / local file / download timestamp / **base64 `content`**. Link-only entries have `content: null`; community PoCs embed content only when verified (see Security) — otherwise metadata + `verification` reason.
 
 ## CLI
 
@@ -138,6 +138,8 @@ PoC downloads hit the GitHub API, which is rate-limited (60 req/h unauthenticate
 | `KUAIDAILI_API_URL` | `https://dps.kdlapi.com/api/getdps` | Kuaidaili extraction API endpoint |
 | `KUAIDAILI_NUM` | `10` | IPs pulled from the API per request |
 | `KUAIDAILI_POOL_MIN` | `3` | refresh the pool when it drops below this many |
+| `CACHE_MAC_KEY` | *(empty)* | HMAC key for cache tamper detection (empty = marker-only) |
+| `VERIFIED_POC_REPOS` | *(empty)* | comma-separated `owner/repo` allowlist trusted for community PoC content |
 
 ### Mode `direct` — no proxy
 
@@ -177,6 +179,15 @@ Without `KUAIDAILI_ORDERID`, the `kuaidaili` mode **degrades to direct** instead
 
 > **Kuaidaili product types.** Kuaidaili sells two proxy styles. This tool implements the **extraction API** style (`orderid` → API returns a list of `ip:port`). If you use the **tunnel** style instead (a fixed `host:port` plus username/password, with IP rotation done on Kuaidaili's side), configure it as `fixed` mode with `PROXY_URL=http://user:pass@host:port` — no order ID or pool involved. Check your Kuaidaili console to see which product you have.
 
+## Security
+
+Downloaded PoCs are code — treat them as untrusted.
+
+- GitHub downloads are pinned to the default-branch **commit SHA** (`commit_sha` / `commit_pinned`), so later repo changes don't silently swap what you saved.
+- **Community PoCs are opt-in** (`community_poc=True`) and unverified (found by keyword + stars). Content is embedded into `<CVE-ID>.json` **only when it passes a static risk scan** (`curl|sh`, `powershell -enc`, `certutil`, remote-fetch-then-`eval` …) or the repo is in `VERIFIED_POC_REPOS`; otherwise just metadata + a `verification` reason. Files are always saved to disk either way.
+- Local caches are tagged `_src: poc_scout`; set `CACHE_MAC_KEY` to HMAC-sign them so tampered cache files are rejected.
+- Requires `mcp>=2.0` (uses the 2.x `MCPServer` API).
+
 ## Testing
 
 ```bash
@@ -184,7 +195,7 @@ python -m pytest            # all tests: fuzz + integration + download + cache +
 python -m pytest --cov      # with coverage
 ```
 
-43 tests, CI runs on every push (badge above).
+79 tests, CI runs on every push (badge above).
 
 ## License
 

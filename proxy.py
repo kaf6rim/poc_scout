@@ -79,7 +79,9 @@ def _kdl_pool_instance():
 def _kdl_fetch():
     """从快代理动态代理 API 提取 ip:port 列表。无 orderid → []（kuaidaili 模式降级直连）。
     快代理 dps API：GET /api/getdps?orderid=..&num=..&format=json&sep=1&signature=..
-    返回 {"code":0,"data":{"proxy_list":["ip:port",...]}}。"""
+    返回 {"code":0,"data":{"proxy_list":["ip:port",...]}}。
+    注意：官方当前文档该端点用 secret_id+signature(token/hmacsha1) 认证，orderid+md5 是旧式方案；
+    接入真实订单前先用 probe_kuaidaili() 自检确认订单用的哪种认证。"""
     if not KUAIDAILI_ORDERID:
         return []
     params = {"orderid": KUAIDAILI_ORDERID, "num": KUAIDAILI_NUM, "format": "json", "sep": 1}
@@ -93,6 +95,57 @@ def _kdl_fetch():
     except Exception:
         pass
     return []
+
+
+def probe_kuaidaili():
+    """接入快代理前的自检：按步骤打印结果，定位 auth/网络/下载哪一步不通。
+    用法：PROXY_MODE=kuaidaili KUAIDAILI_ORDERID=.. python -c "from proxy import probe_kuaidaili; print(probe_kuaidaili())"
+    也打印 API 原始响应，便于对照订单实际认证方案（orderid+md5 还是 secret_id+token）。"""
+    out = {
+        "config": {
+            "PROXY_MODE": PROXY_MODE,
+            "orderid_set": bool(KUAIDAILI_ORDERID),
+            "secret_set": bool(KUAIDAILI_SECRET),
+            "api_url": KUAIDAILI_API_URL,
+        },
+    }
+    # 1. 直接调提取 API 并保留原始响应（定位 auth 是否匹配）
+    if KUAIDAILI_ORDERID:
+        params = {"orderid": KUAIDAILI_ORDERID, "num": KUAIDAILI_NUM, "format": "json", "sep": 1}
+        if KUAIDAILI_SECRET:
+            params["signature"] = hashlib.md5((KUAIDAILI_ORDERID + KUAIDAILI_SECRET).encode()).hexdigest()
+        try:
+            r = requests.get(KUAIDAILI_API_URL, params=params, timeout=10)
+            out["raw_status"] = r.status_code
+            out["raw_body"] = r.text[:300]
+            data = r.json()
+            out["code"] = data.get("code")
+            out["msg"] = data.get("msg")
+            ips = (data.get("data") or {}).get("proxy_list") or [] if data.get("code") == 0 else []
+            out["fetch"] = f"OK {len(ips)} IPs" if ips else "FAIL 未拉到 IP（看 code/msg 定位）"
+        except Exception as e:
+            out["fetch"] = f"EXC {type(e).__name__}: {str(e)[:120]}"
+    else:
+        out["fetch"] = "SKIP 未设置 KUAIDAILI_ORDERID"
+    # 2. 取一个代理实测 GitHub 连通性（海外 IP 才稳）
+    proxy = _kdl_pool_instance().get() if KUAIDAILI_ORDERID else None
+    if proxy:
+        px = {"http": f"http://{proxy}", "https": f"http://{proxy}"}
+        try:
+            r = requests.get("https://api.github.com/rate_limit", proxies=px, timeout=10,
+                             headers={"User-Agent": "poc_scout-probe"})
+            out["github_api"] = f"status {r.status_code}"
+        except Exception as e:
+            out["github_api"] = f"EXC {type(e).__name__}: {str(e)[:80]}"
+        try:
+            r2 = requests.get("https://raw.githubusercontent.com/octocat/Hello-World/HEAD/README",
+                              proxies=px, timeout=10)
+            out["raw_download"] = f"status {r2.status_code}"
+        except Exception as e:
+            out["raw_download"] = f"EXC {type(e).__name__}: {str(e)[:80]}"
+    else:
+        out["github_api"] = "未取到代理（无 orderid 或池空）"
+    return out
 
 
 # ---------- 对外接口 ----------

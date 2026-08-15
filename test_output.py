@@ -173,3 +173,54 @@ def test_write_cve_poc_json_skips_no_poc(tmp_output):
     _write_cve_poc_json("Test_Device", [rec])
     path = os.path.join(tmp_output, "Test_Device", "CVE-2024-0001.json")
     assert not os.path.exists(path)
+
+
+def test_community_poc_content_not_embedded(tmp_output):
+    """未验证的社区 POC：json 不嵌 base64 内容，只记元数据 + unverified/commit_sha 标记。"""
+    poc_path = os.path.join(tmp_output, "Test_Device", "CVE-2024-0001_poc_1_community.py")
+    os.makedirs(os.path.dirname(poc_path), exist_ok=True)
+    with open(poc_path, "wb") as f:
+        f.write(b"#!/usr/bin/env python\nprint('community')")
+    rec = _scored(tmp_output, with_local=False)
+    rec["community_pocs"] = [{
+        "repo": "foo/poc", "stars": 100,
+        "url": "https://github.com/foo/poc",
+        "poc_local": [poc_path],
+        "downloaded_at": "2024-01-03 09:00:00",
+        "commit_sha": "abc123",
+        "unverified_source": True,
+    }]
+    _write_cve_poc_json("Test_Device", [rec])
+    path = os.path.join(tmp_output, "Test_Device", "CVE-2024-0001.json")
+    data = json.loads(open(path, encoding="utf-8").read())
+    # 官方引用条目前置、社区条目在后 → 按 source 定位社区条目
+    poc = next(p for p in data["pocs"] if p.get("source") == "community")
+    assert poc["content"] is None
+    assert poc["content_encoding"] is None
+    assert poc["unverified_source"] is True
+    assert poc["commit_sha"] == "abc123"
+
+
+def test_community_poc_verified_embeds_content(tmp_output):
+    """验证通过的社区 POC：嵌 base64 内容（与官方引用一致），并记 verification 说明。"""
+    poc_path = os.path.join(tmp_output, "Test_Device", "CVE-2024-0001_poc_1_community.py")
+    os.makedirs(os.path.dirname(poc_path), exist_ok=True)
+    with open(poc_path, "wb") as f:
+        f.write(b"#!/usr/bin/env python\nprint('ok')")
+    rec = _scored(tmp_output, with_local=False)
+    rec["community_pocs"] = [{
+        "repo": "foo/poc", "stars": 100,
+        "url": "https://github.com/foo/poc",
+        "poc_local": [poc_path],
+        "downloaded_at": "2024-01-03 09:00:00",
+        "commit_sha": "abc123",
+        "verified": True,
+        "verification": "static_ok",
+    }]
+    _write_cve_poc_json("Test_Device", [rec])
+    path = os.path.join(tmp_output, "Test_Device", "CVE-2024-0001.json")
+    data = json.loads(open(path, encoding="utf-8").read())
+    poc = next(p for p in data["pocs"] if p.get("source") == "community")
+    assert poc["content_encoding"] == "base64"
+    assert base64.b64decode(poc["content"]) == b"#!/usr/bin/env python\nprint('ok')"
+    assert poc.get("verification") == "static_ok"

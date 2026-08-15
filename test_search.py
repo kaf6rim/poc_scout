@@ -140,9 +140,11 @@ def test_community_poc(monkeypatch, tmp_output, make_cve, fake_sources):
     monkeypatch.setattr(cve_search, "github_quota_remaining", lambda: 50)   # 配额充足
     monkeypatch.setattr(poc_downloader, "search_github_poc_repos",
                         lambda cve_id, per_page=None: [("foo", "bar", 5)])
-    monkeypatch.setattr(poc_downloader, "list_repo_files", lambda owner, repo: (["poc.py"], 200))
+    monkeypatch.setattr(poc_downloader, "_repo_head_sha", lambda owner, repo: "testsha123")
+    monkeypatch.setattr(poc_downloader, "list_repo_files",
+                        lambda owner, repo, ref=None: (["poc.py"], 200))
     monkeypatch.setattr(poc_downloader, "download_raw",
-                        lambda owner, repo, path: (b"#!/usr/bin/env python\nprint()", 200))
+                        lambda owner, repo, path, ref=None: (b"#!/usr/bin/env python\nprint()", 200))
     monkeypatch.setattr(poc_downloader.time, "sleep", lambda s: None)       # 跳过节流 sleep
     r = search_firmware("Test Device", download_poc=True, community_poc=True, force_refresh=True)
     assert r["results"][0].get("community_pocs"), "应有社区 POC 补充"

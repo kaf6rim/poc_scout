@@ -10,7 +10,7 @@ import requests
 from config import (
     OUTPUT_DIR, HTTP_TIMEOUT, GITHUB_TOKEN,
     MAX_POC_FILES_PER_REPO, MAX_POC_FILE_BYTES,
-    COMMUNITY_POC_PER_CVE, GITHUB_SEARCH_SLEEP,
+    COMMUNITY_POC_PER_CVE, GITHUB_SEARCH_SLEEP, VERIFIED_POC_REPOS,
 )
 from proxy import proxies_for_github, github_headers, rotate_ip
 
@@ -80,6 +80,17 @@ def _github_get(url, retries=2):
     return resp
 
 
+def _repo_head_sha(owner, repo):
+    """解析默认分支当前 commit SHA（下载时 pin 住，防 HEAD 漂移/指向被篡改）。失败返回 None。"""
+    resp = _safe_get(f"https://api.github.com/repos/{owner}/{repo}/commits/HEAD")
+    if resp is None or resp.status_code != 200:
+        return None
+    try:
+        return resp.json().get("sha")
+    except ValueError:
+        return None
+
+
 def _parse_github(url):
     m = GITHUB_REPO_RE.search(url)
     return (m.group(1), m.group(2)) if m else None
@@ -99,9 +110,45 @@ def _is_poc_file(path):
     return ext in CODE_EXT and POC_NAME_RE.search(low)
 
 
-def list_repo_files(owner, repo):
-    """列仓库 blob 文件树。返回 (paths, status)；status=0 表示网络失败。"""
-    url = f"https://api.github.com/repos/{owner}/{repo}/git/trees/HEAD?recursive=1"
+# ---------- 社区 POC 静态风险扫描（决定是否把内容嵌进输出 JSON）----------
+# 命中"下载即执行 / 混淆加载 / 远程拉取后 eval"等典型供应链投毒模式 → 视为不可信，不嵌内容。
+# 注意：这是保守的启发式，不是安全保证；文件本身照常落盘，仅影响是否嵌入 JSON。
+
+_RISK_PATTERNS = [
+    (re.compile(rb"curl[^\n]*\|\s*(ba|da)?sh\b", re.I), "curl|sh 管道执行"),
+    (re.compile(rb"wget[^\n]*\|\s*(ba|da)?sh\b", re.I), "wget|sh 管道执行"),
+    (re.compile(rb"(curl|wget)[^\n]*\|\s*python[^\n]*\b", re.I), "curl|python 管道执行"),
+    (re.compile(rb"\b(base64|openssl enc)[^\n]*\|\s*(ba|da)?sh\b", re.I), "解码后管道执行"),
+    (re.compile(rb"powershell[^\n]*\s+(-enc\b|-e\b|iex\b|IEX\b)", re.I), "PowerShell 混淆执行"),
+    (re.compile(rb"certutil[^\n]*\s-decode\b", re.I), "certutil 解码"),
+    (re.compile(rb"(Invoke-WebRequest|iwr)[^\n]*\|\s*IEX\b", re.I), "下载即执行(IEX)"),
+]
+_REMOTE_EVAL = re.compile(rb"(requests|urllib|http)[^\n]{0,120}\s+(eval|exec)\s*\(", re.I)
+
+
+def _poc_risk_scan(content):
+    """静态扫描社区 POC 内容。返回 (是否通过, 说明)。"""
+    if not isinstance(content, (bytes, bytearray)):
+        content = str(content).encode("utf-8", "replace")
+    reasons = [label for pat, label in _RISK_PATTERNS if pat.search(content)]
+    if _REMOTE_EVAL.search(content):
+        reasons.append("远程拉取后 eval/exec")
+    if reasons:
+        return False, "命中危险模式: " + "; ".join(dict.fromkeys(reasons))
+    return True, "static_ok"
+
+
+def _community_poc_verified(owner, repo, content):
+    """判定社区 POC 是否"验证安全"：白名单仓库直接通过；否则过静态风险扫描。"""
+    if f"{owner}/{repo}".lower() in VERIFIED_POC_REPOS:
+        return True, "allowlist"
+    return _poc_risk_scan(content)
+
+
+def list_repo_files(owner, repo, ref=None):
+    """列仓库 blob 文件树。默认 HEAD，可传 commit SHA pin 住。返回 (paths, status)；status=0 表示网络失败。"""
+    ref = ref or "HEAD"
+    url = f"https://api.github.com/repos/{owner}/{repo}/git/trees/{ref}?recursive=1"
     resp = _github_get(url)
     if resp is None:
         return None, 0
@@ -111,9 +158,10 @@ def list_repo_files(owner, repo):
     return [t["path"] for t in tree if t.get("type") == "blob"], 200
 
 
-def download_raw(owner, repo, path):
-    """下单个 raw 文件。返回 (content_bytes, status)；status=0 表示网络失败。"""
-    url = f"https://raw.githubusercontent.com/{owner}/{repo}/HEAD/{path}"
+def download_raw(owner, repo, path, ref=None):
+    """下单个 raw 文件。默认 HEAD，可传 commit SHA。返回 (content_bytes, status)；status=0 表示网络失败。"""
+    ref = ref or "HEAD"
+    url = f"https://raw.githubusercontent.com/{owner}/{repo}/{ref}/{path}"
     resp = _safe_get(url)
     if resp is None:
         return None, 0
@@ -147,20 +195,23 @@ def _sniff_ext(content):
 
 
 def _download_repo(owner, repo, cve_dir, cve_id):
-    """列树→过滤 POC 文件→下 raw（官方引用和社区补充共用）。返回 (local_paths, skip_reason)。"""
-    files, status = list_repo_files(owner, repo)
+    """列树→过滤 POC 文件→下 raw（官方引用和社区补充共用）。
+    先 pin 默认分支 commit SHA 再下载（防 HEAD 漂移/指向被篡改）。返回 (local_paths, skip_reason, commit_sha)。"""
+    sha = _repo_head_sha(owner, repo)
+    ref = sha or None
+    files, status = list_repo_files(owner, repo, ref=ref)
     if status in (403, 429):
-        return [], f"GitHub 限速({status})：配 GITHUB_TOKEN 或切换 FlClash 节点后重试"
+        return [], f"GitHub 限速({status})：配 GITHUB_TOKEN 或切换 FlClash 节点后重试", sha
     if files is None:
-        return [], f"列文件树失败 status={status}"
+        return [], f"列文件树失败 status={status}", sha
     poc_files = [p for p in files if _is_poc_file(p)][:MAX_POC_FILES_PER_REPO]
     if not poc_files:
-        return [], "仓库内无 POC 代码文件（可能只有截图/文档）"
+        return [], "仓库内无 POC 代码文件（可能只有截图/文档）", sha
 
     os.makedirs(cve_dir, exist_ok=True)   # 有 POC 文件要下才建目录
     local = []
     for i, p in enumerate(poc_files, 1):
-        content, st = download_raw(owner, repo, p)
+        content, st = download_raw(owner, repo, p, ref=ref)
         if st != 200 or not content or len(content) > MAX_POC_FILE_BYTES:
             continue
         base = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(p)) or "poc"
@@ -168,7 +219,7 @@ def _download_repo(owner, repo, cve_dir, cve_id):
         with open(out, "wb") as f:
             f.write(content)
         local.append(out)
-    return local, (None if local else "文件下载失败")
+    return local, (None if local else "文件下载失败"), sha
 
 
 def _download_github_ref(ref, cve_dir, cve_id):
@@ -181,8 +232,11 @@ def _download_github_ref(ref, cve_dir, cve_id):
         ref["poc_local"] = []
         ref["download_skipped"] = "无法解析 GitHub 仓库"
         return
-    local, skip = _download_repo(gh[0], gh[1], cve_dir, cve_id)
+    local, skip, sha = _download_repo(gh[0], gh[1], cve_dir, cve_id)
     ref["poc_local"] = local
+    if sha:
+        ref["commit_sha"] = sha
+        ref["commit_pinned"] = True
     if local:
         ref["download_status"] = "ok"
         ref["downloaded_at"] = _now()
@@ -195,7 +249,8 @@ def _download_github_blob(ref, cve_dir, blob, cve_id):
     """blob 型引用：指向具体文件，直接检查该文件是否存活。
     文件被删（404）→ 诚实标注"引用已失效"，而不是笼统说"无 POC 代码文件"。"""
     owner, repo, path = blob
-    files, status = list_repo_files(owner, repo)
+    sha = _repo_head_sha(owner, repo)
+    files, status = list_repo_files(owner, repo, ref=sha or None)
     if status in (403, 429):
         ref["poc_local"] = []
         ref["download_status"] = "failed"
@@ -212,7 +267,7 @@ def _download_github_blob(ref, cve_dir, blob, cve_id):
         ref["download_skipped"] = "引用文件已失效（可能被作者删除）"
         return
     os.makedirs(cve_dir, exist_ok=True)
-    content, st = download_raw(owner, repo, path)
+    content, st = download_raw(owner, repo, path, ref=sha or None)
     if st != 200 or not content or len(content) > MAX_POC_FILE_BYTES:
         ref["poc_local"] = []
         ref["download_status"] = "failed"
@@ -225,6 +280,9 @@ def _download_github_blob(ref, cve_dir, blob, cve_id):
     ref["poc_local"] = [out]
     ref["download_status"] = "ok"
     ref["downloaded_at"] = _now()
+    if sha:
+        ref["commit_sha"] = sha
+        ref["commit_pinned"] = True
 
 
 def _download_exploitdb_ref(ref, cve_dir, cve_id):
@@ -295,7 +353,8 @@ def search_github_poc_repos(cve_id, per_page=None):
     仓库搜索 API 未认证 10/min，节流重试一次。"""
     per_page = per_page or COMMUNITY_POC_PER_CVE
     url = "https://api.github.com/search/repositories"
-    params = {"q": f"{cve_id} poc", "sort": "stars", "order": "desc", "per_page": per_page}
+    # fork:false / archived:false：排除易被攻击者利用的 fork 与被归档仓库
+    params = {"q": f"{cve_id} poc fork:false archived:false", "sort": "stars", "order": "desc", "per_page": per_page}
     resp = None
     for attempt in range(2):
         resp = _safe_get(url, params=params)
@@ -337,14 +396,28 @@ def community_poc_supplement(result, fw_dir):
     cve_dir = os.path.join(OUTPUT_DIR, fw_dir)
     result.setdefault("community_pocs", [])
     for owner, repo, stars in repos:
-        local, skip = _download_repo(owner, repo, cve_dir, cve_id)
+        local, skip, sha = _download_repo(owner, repo, cve_dir, cve_id)
         if local:
+            verified, ver = True, "static_ok"
+            risky = []
+            for p in local:
+                try:
+                    with open(p, "rb") as f:
+                        ok, reason = _community_poc_verified(owner, repo, f.read())
+                except OSError:
+                    ok, reason = False, "读取失败"
+                if not ok:
+                    verified, risky = False, risky + [reason]
             result["community_pocs"].append({
                 "repo": f"{owner}/{repo}",
                 "stars": stars,
                 "url": f"https://github.com/{owner}/{repo}",
                 "poc_local": local,
                 "downloaded_at": _now(),
+                "commit_sha": sha,
+                # 验证：白名单/静态扫描通过 → 可嵌内容；未通过 → 仅记元数据，需显式告警
+                "verified": verified,
+                "verification": "; ".join(dict.fromkeys(risky)) if risky else ver,
             })
         time.sleep(GITHUB_SEARCH_SLEEP)   # 每 CVE 搜索后节流
     return result

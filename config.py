@@ -56,6 +56,8 @@ DOWNLOAD_CONCURRENCY = int(os.environ.get("DOWNLOAD_CONCURRENCY", "4"))
 # 社区 POC 补充：对无官方 POC 的 CVE 搜 GitHub 仓库（仓库搜索 API 未认证 10/min）
 COMMUNITY_POC_PER_CVE = int(os.environ.get("COMMUNITY_POC_PER_CVE", "3"))
 GITHUB_SEARCH_SLEEP = float(os.environ.get("GITHUB_SEARCH_SLEEP", "7"))  # 搜索节流，配 token 后可调小
+# 手动信任的社区 POC 仓库（逗号分隔 "owner/repo"），白名单仓库跳过静态风险扫描直接视为已验证
+VERIFIED_POC_REPOS = {s.strip().lower() for s in os.environ.get("VERIFIED_POC_REPOS", "").split(",") if s.strip()}
 
 # 结果缓存：同一固件查过 TTL 内直接读 output/<固件>/_result.json，不重跑不重下
 RESULT_CACHE_TTL = int(os.environ.get("RESULT_CACHE_TTL", "86400"))  # 默认 24h

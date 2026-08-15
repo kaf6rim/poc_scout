@@ -19,10 +19,10 @@ from config import (
     RESULTS_PER_PAGE, MAX_PAGES, RATE_SLEEP, HTTP_TIMEOUT, USER_AGENT,
     DESCRIPTION_EXCERPT_LEN, DEFAULT_TOP_N, OUTPUT_DIR, DOWNLOAD_CONCURRENCY,
     RESULT_CACHE_TTL, EPSS_API_URL, EPSS_WEIGHT, EPSS_ENABLED,
-    COMPONENT_CANDIDATE_LIMIT,
+    COMPONENT_CANDIDATE_LIMIT, CACHE_DIR,
     OSV_API_URL, OSV_ECOSYSTEMS, OSV_ENABLED,
 )
-from cache import CachedRequest
+from cache import CachedRequest, cache_sign, cache_verify, _atomic_write_json
 from poc_downloader import (
     download_poc_for_cve, github_quota_remaining, GITHUB_RATE_MIN,
     community_poc_supplement,
@@ -178,20 +178,21 @@ def collect_cveorg(fw, cve_id=None, candidate_limit=None):
 
 # ---------- provider: NVD（兜底）----------
 
-def _nvd_search(query=None, cve_id=None, start_index=0, limit=None):
+def _nvd_search(query=None, cve_id=None, start_index=0, limit=None, session=None):
     params = {"resultsPerPage": limit if limit else RESULTS_PER_PAGE, "startIndex": start_index}
     if cve_id:
         params["cveId"] = cve_id
     else:
         params["keywordSearch"] = query
     url = NVD_API_BASE + "?" + urlencode(params)
+    sess = session or _sess   # 线程池调用方传独立 session，避免共享 Session 的竞态
 
     data = _cache.get(url)
     if data is None:
-        resp = _sess.get(url, timeout=HTTP_TIMEOUT)
+        resp = sess.get(url, timeout=HTTP_TIMEOUT)
         if resp.status_code == 403:   # 大概率限速，退避重试一次
             time.sleep(RATE_SLEEP)
-            resp = _sess.get(url, timeout=HTTP_TIMEOUT)
+            resp = sess.get(url, timeout=HTTP_TIMEOUT)
         resp.raise_for_status()
         data = json.loads(resp.content.decode("utf-8-sig"))  # NVD 响应带 BOM
         _cache.put(url, data)
@@ -604,9 +605,14 @@ def _apply_epss(results):
 
 def _nvd_severity_fill(result):
     """对缺 CVSS 的 CVE 用 NVD 补查严重等级（NVD 是最权威来源，cve.org 主源 CNA 常不提交 metrics）。
-    失败静默跳过，不崩任务。extra 标记 nvd_severity 标明补查来源。"""
+    失败静默跳过，不崩任务。extra 标记 nvd_severity 标明补查来源。
+    在 ThreadPoolExecutor 里并发跑，用独立 session 避免共享模块级 _sess 的竞态。"""
     try:
-        for v in _nvd_search(cve_id=result["cve_id"], limit=1).get("vulnerabilities", []):
+        sess = requests.Session()
+        sess.headers.update({"User-Agent": USER_AGENT})
+        if NVD_API_KEY:
+            sess.headers["apiKey"] = NVD_API_KEY
+        for v in _nvd_search(cve_id=result["cve_id"], limit=1, session=sess).get("vulnerabilities", []):
             sev, score = _extract_severity(v["cve"])
             if sev or score:
                 result["severity"] = sev
@@ -679,6 +685,10 @@ def _main_cve_entry(x):
             "download_status": "ok",
             "download_skipped": None,
             "downloaded_at": c.get("downloaded_at"),
+            "commit_sha": c.get("commit_sha"),
+            "verified": c.get("verified"),
+            "verification": c.get("verification"),
+            "unverified_source": c.get("unverified_source", True),
         })
     return {
         "cve_id": x["cve_id"],
@@ -715,6 +725,7 @@ def _write_main_json(manifest_dir, firmware_name, source, scored, components=Non
             "source": source,
             "total_cves": len(scored),
             "components": components or [],
+            "note": "本文件含来自第三方数据源（CVE 描述/引用/社区 POC）的未验证内容，请勿直接执行或未经转义渲染。",
             "cves": [_main_cve_entry(x) for x in scored],
         }
         with open(path, "w", encoding="utf-8") as f:
@@ -754,12 +765,18 @@ def _write_cve_poc_json(manifest_dir, scored):
                 })
         for c in (x.get("community_pocs") or []):
             for p in (c.get("poc_local") or []):
+                # 社区 POC：白名单/静态扫描通过（verified）才嵌 base64 内容；未通过只记元数据
+                verified = bool(c.get("verified"))
                 entries.append(_poc_entry(p, {
                     "url": c.get("url"),
                     "name": c.get("repo"),
                     "source": "community",
                     "downloaded_at": c.get("downloaded_at"),
                     "stars": c.get("stars"),
+                    "commit_sha": c.get("commit_sha"),
+                    "embed_content": verified,
+                    "unverified_source": not verified,
+                    "verification": c.get("verification"),
                 }))
         if not entries:
             continue   # 无 poc 记录的 CVE 不写空 json
@@ -774,13 +791,15 @@ def _write_cve_poc_json(manifest_dir, scored):
 
 
 def _poc_entry(path, meta):
-    """单个 poc 文件的信息栏：元数据 + base64 内容（读文件失败内容为 null，不崩）。"""
+    """单个 poc 文件的信息栏：元数据 + base64 内容（读文件失败内容为 null，不崩）。
+    embed_content=False 时不读文件（社区未验证 POC 不嵌内容，避免未信任代码进输出/agent 上下文）。"""
     content = None
-    try:
-        with open(path, "rb") as f:
-            content = base64.b64encode(f.read()).decode("ascii")
-    except OSError:
-        pass
+    if meta.get("embed_content", True):
+        try:
+            with open(path, "rb") as f:
+                content = base64.b64encode(f.read()).decode("ascii")
+        except OSError:
+            pass
     entry = {
         "url": meta.get("url"),
         "name": meta.get("name"),
@@ -792,6 +811,12 @@ def _poc_entry(path, meta):
     }
     if meta.get("stars") is not None:
         entry["stars"] = meta["stars"]
+    if meta.get("commit_sha"):
+        entry["commit_sha"] = meta["commit_sha"]
+    if meta.get("unverified_source"):
+        entry["unverified_source"] = True
+    if meta.get("verification"):
+        entry["verification"] = meta["verification"]
     return entry
 
 
@@ -955,10 +980,10 @@ def _version_in_ranges(version, ranges):
     return True if any_compared else None
 
 
-def _load_result_cache(manifest_dir, query_hash, top_n, download_poc, community_poc):
-    """读结果缓存。命中且新鲜、且 hash 匹配、且覆盖本次请求范围才返回，否则 None。
+def _load_result_cache(query_hash, top_n, download_poc, community_poc):
+    """读结果缓存。文件名即 hash（cache/result_<hash>.json），命中且新鲜、且覆盖本次请求范围才返回。
     缓存存全量；返回时按 top_n 截断、清内部元数据。"""
-    path = os.path.join(OUTPUT_DIR, manifest_dir, "_result.json")
+    path = os.path.join(CACHE_DIR, f"result_{query_hash}.json")
     if not os.path.exists(path):
         return None
     try:
@@ -966,9 +991,9 @@ def _load_result_cache(manifest_dir, query_hash, top_n, download_poc, community_
             data = json.load(f)
     except (OSError, json.JSONDecodeError):
         return None
-    if not data.get("found"):
+    if not cache_verify(data):   # 完整性：_src 标记必须存在；CACHE_MAC_KEY 设置时校验签名
         return None
-    if data.get("query_hash") != query_hash:   # 目录名碰撞 → 缓存不属于这次查询
+    if not data.get("found"):
         return None
     if data.get("_ts", 0) + RESULT_CACHE_TTL < time.time():
         return None
@@ -983,8 +1008,9 @@ def _load_result_cache(manifest_dir, query_hash, top_n, download_poc, community_
         requested_scope = float("inf") if top_n == 0 else top_n
         if cached_scope != 0 and requested_scope > cached_scope:
             return None
+    data.pop("_src", None)
+    data.pop("_mac", None)
     data.pop("_ts", None)
-    data.pop("query_hash", None)
     data.pop("download_poc", None)
     data.pop("download_top_n", None)
     data.pop("community_poc", None)
@@ -994,21 +1020,20 @@ def _load_result_cache(manifest_dir, query_hash, top_n, download_poc, community_
     return data
 
 
-def _save_result_cache(manifest_dir, query_hash, result, download_poc, community_poc, download_top_n=0):
-    """存结果缓存（存全量，返回时再截断 top_n）。"""
+def _save_result_cache(query_hash, result, download_poc, community_poc, download_top_n=0):
+    """存结果缓存（存全量，返回时再截断 top_n）。文件名即 hash，不再占输出目录。"""
     if not result.get("found"):
         return
-    path = os.path.join(OUTPUT_DIR, manifest_dir, "_result.json")
+    path = os.path.join(CACHE_DIR, f"result_{query_hash}.json")
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        os.makedirs(CACHE_DIR, exist_ok=True)
         data = dict(result)
         data["_ts"] = time.time()
-        data["query_hash"] = query_hash
         data["download_poc"] = download_poc
         data["download_top_n"] = download_top_n if download_poc else 0
         data["community_poc"] = community_poc
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        cache_sign(data)            # 加 _src 标记 + 可选 HMAC，防本地投毒
+        _atomic_write_json(path, data)
     except OSError:
         pass
 
@@ -1026,6 +1051,15 @@ def search_firmware(firmware_name, top_n=DEFAULT_TOP_N, download_poc=False, comm
     if reason:
         return _empty_result(raw, reason)
 
+    # 参数边界（防御本地 agent / 未来 HTTP 暴露的滥用）：top_n 限制 0..1000，组件列表最多 10 个
+    try:
+        top_n = int(top_n)
+    except (TypeError, ValueError):
+        top_n = 0
+    top_n = max(0, min(top_n, 1000))
+    if isinstance(component, list) and len(component) > 10:
+        component = component[:10]
+
     m = CVE_ID_RE.match(raw)
     cve_id = m.group(0).upper() if m else None
     fw = None if cve_id else parse_firmware(raw)
@@ -1039,13 +1073,14 @@ def search_firmware(firmware_name, top_n=DEFAULT_TOP_N, download_poc=False, comm
         fw_dir = ""
         manifest_dir = cve_id
     else:
-        fw_dir = re.sub(r"[^A-Za-z0-9._-]", "_", raw) or "firmware"
+        # 只保留字母数字/下划线/连字符：去掉点，杜绝 "." / ".." 这类路径穿越残留
+        fw_dir = re.sub(r"[^A-Za-z0-9_-]", "_", raw) or "firmware"
         manifest_dir = fw_dir
 
-    # 结果缓存：TTL 内直接返回（带 cached 标记），不重跑不重下；hash 防目录名碰撞
+    # 结果缓存：TTL 内直接返回（带 cached 标记），不重跑不重下；文件名即 hash
     query_hash = _query_hash(raw, download_poc, community_poc, component)
     if not force_refresh:
-        cached = _load_result_cache(manifest_dir, query_hash, top_n, download_poc, community_poc)
+        cached = _load_result_cache(query_hash, top_n, download_poc, community_poc)
         if cached is not None:
             cached["cached"] = True
             return cached
@@ -1149,7 +1184,7 @@ def search_firmware(firmware_name, top_n=DEFAULT_TOP_N, download_poc=False, comm
         out_full["normalized"] = {"cve_id": cve_id}
     else:
         out_full["normalized"] = {"vendor": fw["vendor"], "model_core": fw["model_core"]}
-    _save_result_cache(manifest_dir, query_hash, out_full, download_poc, community_poc, download_top_n=top_n)
+    _save_result_cache(query_hash, out_full, download_poc, community_poc, download_top_n=top_n)
 
     # 返回结果（按 top_n 截断）
     out = dict(out_full)

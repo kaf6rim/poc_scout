@@ -56,20 +56,24 @@ def fake_sources(monkeypatch):
 
 @pytest.fixture
 def tmp_output(tmp_path, monkeypatch):
-    """把输出目录指到临时目录，测试不污染真实 output/。"""
+    """把输出目录与缓存目录指到临时目录，测试不污染真实 output/ 和 cache/。"""
     out = tmp_path / "output"
     out.mkdir()
+    cache_dir = tmp_path / "cache"
     monkeypatch.setattr(cve_search, "OUTPUT_DIR", str(out))
     monkeypatch.setattr(poc_downloader, "OUTPUT_DIR", str(out))
+    monkeypatch.setattr(cve_search, "CACHE_DIR", str(cache_dir))
     return out
 
 
 @pytest.fixture
 def fake_github(monkeypatch):
-    """mock GitHub 下载逻辑：列树 + raw 内容。"""
+    """mock GitHub 下载逻辑：commit SHA 解析 + 列树 + raw 内容。"""
     def _set(files, raw_map):
+        monkeypatch.setattr(poc_downloader, "_repo_head_sha",
+                            lambda owner, repo: "testsha123")
         monkeypatch.setattr(poc_downloader, "list_repo_files",
-                            lambda owner, repo: (files, 200))
+                            lambda owner, repo, ref=None: (files, 200))
         monkeypatch.setattr(poc_downloader, "download_raw",
-                            lambda owner, repo, path: (raw_map.get(path, b""), 200))
+                            lambda owner, repo, path, ref=None: (raw_map.get(path, b""), 200))
     return _set
